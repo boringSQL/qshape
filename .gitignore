@@ -1,0 +1,5 @@
+/bin/
+/qshape
+*.test
+*.out
+clusters.json
