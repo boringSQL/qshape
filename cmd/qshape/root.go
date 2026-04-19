@@ -16,6 +16,7 @@ func Run() error {
 		normalizeCmd(),
 		fingerprintCmd(),
 		captureCmd(),
+		attributeCmd(),
 	)
 	return root.Execute()
 }

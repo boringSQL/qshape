@@ -14,13 +14,23 @@ type (
 	}
 
 	Cluster struct {
-		Fingerprint     string  `json:"fingerprint"`
-		Canonical       string  `json:"canonical"`
-		Members         []Query `json:"members"`
-		TotalCalls      int64   `json:"total_calls"`
-		TotalExecTimeMs float64 `json:"total_exec_time_ms,omitempty"`
-		MeanExecTimeMs  float64 `json:"mean_exec_time_ms,omitempty"`
-		Rows            int64   `json:"rows,omitempty"`
+		Fingerprint     string             `json:"fingerprint"`
+		Canonical       string             `json:"canonical"`
+		Members         []Query            `json:"members"`
+		TotalCalls      int64              `json:"total_calls"`
+		TotalExecTimeMs float64            `json:"total_exec_time_ms,omitempty"`
+		MeanExecTimeMs  float64            `json:"mean_exec_time_ms,omitempty"`
+		Rows            int64              `json:"rows,omitempty"`
+		Params          []ParamAttribution `json:"params,omitempty"`
+	}
+
+	ParamAttribution struct {
+		Position   int    `json:"position"`
+		Schema     string `json:"schema,omitempty"`
+		Table      string `json:"table,omitempty"`
+		Column     string `json:"column,omitempty"`
+		Confidence string `json:"confidence"`
+		Note       string `json:"note,omitempty"`
 	}
 )
 
