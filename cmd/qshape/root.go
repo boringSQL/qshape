@@ -17,6 +17,7 @@ func Run() error {
 		fingerprintCmd(),
 		captureCmd(),
 		attributeCmd(),
+		regresqlStubCmd(),
 	)
 	return root.Execute()
 }
