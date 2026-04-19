@@ -7,5 +7,8 @@ func Normalize(sql string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := reshape(tree); err != nil {
+		return "", err
+	}
 	return pg_query.Deparse(tree)
 }
