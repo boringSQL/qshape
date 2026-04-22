@@ -319,5 +319,8 @@ func loadClustersDoc(path string) (*clustersDoc, error) {
 	if err := json.NewDecoder(r).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("decode clusters.json: %w", err)
 	}
+	if err := validateSchemaVersion(&doc); err != nil {
+		return nil, err
+	}
 	return &doc, nil
 }

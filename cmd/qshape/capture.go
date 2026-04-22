@@ -109,5 +109,5 @@ FROM pg_stat_statements s`)
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	return enc.Encode(map[string]any{"clusters": clusters})
+	return enc.Encode(clustersDoc{SchemaVersion: currentSchemaVersion, Clusters: clusters})
 }

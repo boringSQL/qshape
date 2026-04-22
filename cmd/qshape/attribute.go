@@ -16,10 +16,6 @@ import (
 )
 
 type (
-	clustersDoc struct {
-		Clusters []qshape.Cluster `json:"clusters"`
-	}
-
 	attrCtx struct {
 		byPosition map[int]*qshape.ParamAttribution
 	}
@@ -92,6 +88,9 @@ func runAttribute(inPath, connStr string, top int) error {
 	var doc clustersDoc
 	if err := json.NewDecoder(r).Decode(&doc); err != nil {
 		return fmt.Errorf("decode clusters.json: %w", err)
+	}
+	if err := validateSchemaVersion(&doc); err != nil {
+		return err
 	}
 
 	ctx := context.Background()
