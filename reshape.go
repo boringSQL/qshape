@@ -111,8 +111,10 @@ func reshapeUpdate(u *pg_query.UpdateStmt) {
 	}
 	dec := decorativeAliases(entries)
 	if len(dec) > 0 {
-		if u.Relation != nil && u.Relation.Alias != nil && dec[u.Relation.Alias.Aliasname] {
-			u.Relation.Alias = nil
+		if u.Relation != nil && u.Relation.Alias != nil {
+			if _, ok := dec[u.Relation.Alias.Aliasname]; ok {
+				u.Relation.Alias = nil
+			}
 		}
 		stripAliasesInFrom(u.FromClause, dec)
 		for _, n := range u.TargetList {
@@ -151,8 +153,10 @@ func reshapeDelete(d *pg_query.DeleteStmt) {
 	}
 	dec := decorativeAliases(entries)
 	if len(dec) > 0 {
-		if d.Relation != nil && d.Relation.Alias != nil && dec[d.Relation.Alias.Aliasname] {
-			d.Relation.Alias = nil
+		if d.Relation != nil && d.Relation.Alias != nil {
+			if _, ok := dec[d.Relation.Alias.Aliasname]; ok {
+				d.Relation.Alias = nil
+			}
 		}
 		stripAliasesInFrom(d.UsingClause, dec)
 		rewriteRefs(d.WhereClause, dec)
@@ -308,7 +312,10 @@ func rangeVarEntry(rv *pg_query.RangeVar) scopeEntry {
 	return scopeEntry{relname: rv.Relname, aliasName: alias}
 }
 
-func decorativeAliases(entries []scopeEntry) map[string]bool {
+// decorativeAliases maps each strippable alias to its replacement:
+// nil for single-table scopes (drop), relname for multi-table scopes
+// (rewrite `u.col` to `users.col`)
+func decorativeAliases(entries []scopeEntry) map[string][]*pg_query.Node {
 	relCount := map[string]int{}
 	for _, e := range entries {
 		if e.relname != "" {
@@ -316,7 +323,9 @@ func decorativeAliases(entries []scopeEntry) map[string]bool {
 		}
 	}
 
-	out := map[string]bool{}
+	singleRelation := len(entries) == 1
+
+	out := map[string][]*pg_query.Node{}
 	for _, e := range entries {
 		if e.aliasName == "" || e.required {
 			continue
@@ -324,25 +333,35 @@ func decorativeAliases(entries []scopeEntry) map[string]bool {
 		if e.relname != "" && relCount[e.relname] > 1 {
 			continue
 		}
-		out[e.aliasName] = true
+		if singleRelation {
+			out[e.aliasName] = nil
+		} else if e.relname != "" {
+			out[e.aliasName] = []*pg_query.Node{stringNode(e.relname)}
+		}
 	}
 	return out
 }
 
-func stripAliasesInFrom(items []*pg_query.Node, dec map[string]bool) {
+func stringNode(s string) *pg_query.Node {
+	return &pg_query.Node{Node: &pg_query.Node_String_{String_: &pg_query.String{Sval: s}}}
+}
+
+func stripAliasesInFrom(items []*pg_query.Node, dec map[string][]*pg_query.Node) {
 	for _, n := range items {
 		stripAliasInFromItem(n, dec)
 	}
 }
 
-func stripAliasInFromItem(n *pg_query.Node, dec map[string]bool) {
+func stripAliasInFromItem(n *pg_query.Node, dec map[string][]*pg_query.Node) {
 	if n == nil {
 		return
 	}
 	switch v := n.Node.(type) {
 	case *pg_query.Node_RangeVar:
-		if v.RangeVar.Alias != nil && dec[v.RangeVar.Alias.Aliasname] {
-			v.RangeVar.Alias = nil
+		if v.RangeVar.Alias != nil {
+			if _, ok := dec[v.RangeVar.Alias.Aliasname]; ok {
+				v.RangeVar.Alias = nil
+			}
 		}
 	case *pg_query.Node_JoinExpr:
 		stripAliasInFromItem(v.JoinExpr.Larg, dec)
@@ -350,17 +369,20 @@ func stripAliasInFromItem(n *pg_query.Node, dec map[string]bool) {
 	}
 }
 
-// rewriteRefs goes through expressions and rewrites ColumnRefs
-// whose leading field is a decorative alias
-func rewriteRefs(n *pg_query.Node, dec map[string]bool) {
+// rewriteRefs rewrites ColumnRefs whose leading field is a decorative
+// alias, splicing in the replacement from dec
+func rewriteRefs(n *pg_query.Node, dec map[string][]*pg_query.Node) {
 	if n == nil {
 		return
 	}
 	switch v := n.Node.(type) {
 	case *pg_query.Node_ColumnRef:
 		if len(v.ColumnRef.Fields) >= 2 {
-			if s, ok := v.ColumnRef.Fields[0].Node.(*pg_query.Node_String_); ok && dec[s.String_.Sval] {
-				v.ColumnRef.Fields = v.ColumnRef.Fields[1:]
+			if s, ok := v.ColumnRef.Fields[0].Node.(*pg_query.Node_String_); ok {
+				if repl, present := dec[s.String_.Sval]; present {
+					rest := v.ColumnRef.Fields[1:]
+					v.ColumnRef.Fields = append(append([]*pg_query.Node{}, repl...), rest...)
+				}
 			}
 		}
 	case *pg_query.Node_AExpr:
@@ -411,7 +433,7 @@ func rewriteRefs(n *pg_query.Node, dec map[string]bool) {
 
 // rewriteInSelect rewrites correlated refs inside a nested SelectStmt
 // but skips its FROM clause (its own aliases are handled separately)
-func rewriteInSelect(s *pg_query.SelectStmt, dec map[string]bool) {
+func rewriteInSelect(s *pg_query.SelectStmt, dec map[string][]*pg_query.Node) {
 	if s == nil {
 		return
 	}
