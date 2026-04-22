@@ -78,14 +78,30 @@ func TestReshapeIdempotent(t *testing.T) {
 	}
 }
 
-func TestReshapeJoinStripsDecorativeAliases(t *testing.T) {
+func TestReshapeJoinCanonicalisesAliasesToRelname(t *testing.T) {
+	// In multi-relation scopes we can't strip to bare (would be ambiguous),
+	// but we can canonicalise `u.col` / `users.col` to the same form
 	got, err := Normalize("SELECT u.id, o.total FROM users u INNER JOIN orders o ON o.user_id = u.id WHERE u.tenant = $1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "SELECT id, total FROM users JOIN orders ON user_id = id WHERE tenant = $1"
+	want := "SELECT users.id, orders.total FROM users JOIN orders ON orders.user_id = users.id WHERE users.tenant = $1"
 	if got != want {
 		t.Errorf("got:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReshapeJoinAliasedAndUnaliasedCollapse(t *testing.T) {
+	a, err := Fingerprint("SELECT u.id, o.total FROM users u JOIN orders o ON o.user_id = u.id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Fingerprint("SELECT users.id, orders.total FROM users JOIN orders ON orders.user_id = users.id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Errorf("alias and relname variants should collapse:\n  aliased: %s\n  bare:    %s", a, b)
 	}
 }
 
@@ -150,6 +166,46 @@ func TestReshapeCTEGetsOwnScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "WITH recent AS (SELECT id FROM users WHERE created_at > $1) SELECT id FROM recent"
+	if got != want {
+		t.Errorf("got:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReshapeCTEUsedInOuterJoinKeepsAliases(t *testing.T) {
+	// Outer scope has the CTE ref + another table; both expose user_id.
+	// Stripping the `s` alias would leave an ambiguous bare `user_id`
+	in := "WITH ur AS (SELECT ua.user_id FROM auth.user_account ua WHERE ua.user_id = $1) " +
+		"SELECT ur.user_id FROM ur JOIN sessions s ON s.user_id = ur.user_id"
+	got, err := Normalize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The outer join condition must remain qualified on the sessions side
+	want := "WITH ur AS (SELECT user_id FROM auth.user_account WHERE user_id = $1) " +
+		"SELECT ur.user_id FROM ur JOIN sessions ON sessions.user_id = ur.user_id"
+	if got != want {
+		t.Errorf("got:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReshapeCommaJoinCanonicalisesAliases(t *testing.T) {
+	got, err := Normalize("SELECT a.id FROM users a, orders b WHERE a.id = b.user_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "SELECT users.id FROM users, orders WHERE users.id = orders.user_id"
+	if got != want {
+		t.Errorf("got:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReshapeUpdateWithFromCanonicalisesAliases(t *testing.T) {
+	// UPDATE ... FROM introduces a second relation into the WHERE scope
+	got, err := Normalize("UPDATE users u SET name = $1 FROM orders o WHERE o.user_id = u.id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "UPDATE users SET name = $1 FROM orders WHERE orders.user_id = users.id"
 	if got != want {
 		t.Errorf("got:  %q\nwant: %q", got, want)
 	}
