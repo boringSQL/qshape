@@ -1,6 +1,9 @@
 package qshape
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestReshapeStripsSingleTableAlias(t *testing.T) {
 	got, err := Normalize("SELECT u.id, u.name FROM users u WHERE u.id = $1")
@@ -211,6 +214,91 @@ func TestReshapeUpdateWithFromCanonicalisesAliases(t *testing.T) {
 	}
 }
 
+func TestReshapeExtractFieldStaysIdentifier(t *testing.T) {
+	// pg_query parses `extract(epoch FROM x)` with `epoch` as a string
+	// constant; its deparser would render it as `'epoch'`, which downstream
+	// parameterisers then rewrite to `$N` and break the EXTRACT syntax. The
+	// reshape must keep the field as a bare identifier.
+	got, err := Normalize("SELECT auth.f(extract(epoch FROM '1 hour'::interval)::bigint, 100)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "SELECT auth.f(extract (epoch FROM '1 hour'::interval)::bigint, 100)"
+	if got != want {
+		t.Errorf("got:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReshapeExtractParamFieldRecovered(t *testing.T) {
+	// If the input already had the field parameterised (seen in the wild
+	// from pg_stat_statements pipelines that normalise `'epoch'` -> `$1`),
+	// the canonical must still be executable. Substitute a stable ident.
+	got, err := Normalize("SELECT auth.clean_up_sessions(extract($1 FROM $2::interval)::bigint, $3)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// After recovery, remaining params must be renumbered contiguously
+	// from $1 — EXPLAIN (GENERIC_PLAN) rejects gaps
+	want := "SELECT auth.clean_up_sessions(extract (epoch FROM $1::interval)::bigint, $2)"
+	if got != want {
+		t.Errorf("got:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReshapeCorrelatedRefInNestedSubqueryFrom(t *testing.T) {
+	// Outer alias `u` (decorative, stripped in outer scope) is referenced
+	// from a derived-table WHERE that lives inside a correlated subquery's
+	// FROM. rewriteInSelect must walk the subquery's FROM, not just its
+	// TargetList/WHERE, or the outer ref is left dangling
+	in := `SELECT u.id, (SELECT x FROM (SELECT a.x FROM t a WHERE a.uid = u.id) sub) FROM updated u JOIN t2 p ON p.uid = u.id`
+	got, err := Normalize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "u.") {
+		t.Errorf("outer alias `u` leaked into rewritten SQL: %q", got)
+	}
+}
+
+// COALESCE is parsed as CoalesceExpr, not FuncCall. rewriteRefs must walk
+// its Args or aliases inside COALESCE survive after FROM-alias stripping
+// and the deparsed SQL references a missing table. Seen in a production
+// capture (attribute returned "missing FROM-clause entry for table \"o\"").
+func TestReshapeCoalesceArgsGetRewritten(t *testing.T) {
+	got, err := Normalize("SELECT COALESCE(CAST(o.options -> $1 AS boolean), $2) FROM org.organization o LEFT JOIN org.workspace ON organization.id = workspace.org_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "o.options") {
+		t.Errorf("o.options not rewritten inside COALESCE: %q", got)
+	}
+}
+
+// sum(pg_stat_get_live_tuples(c.oid)) is a FuncCall nested in a FuncCall
+// nested in a CoalesceExpr. Before the fix, the outer CoalesceExpr was
+// skipped so c.oid was never reached.
+func TestReshapeCoalesceWithNestedFuncCallRef(t *testing.T) {
+	got, err := Normalize("SELECT COALESCE(sum(pg_stat_get_live_tuples(c.oid)), $1) FROM pg_class c LEFT JOIN pg_namespace ON pg_namespace.oid = c.relnamespace WHERE c.relkind = $2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "c.oid") {
+		t.Errorf("c.oid not rewritten: %q", got)
+	}
+}
+
+// FILTER (WHERE ...) on an aggregate lands in FuncCall.AggFilter, not Args.
+// Also exercises alias refs inside a CASE expression that's an array_agg arg.
+func TestReshapeAggFilterAndCaseExprRefsGetRewritten(t *testing.T) {
+	got, err := Normalize(`WITH r AS (SELECT COALESCE(array_agg(DISTINCT CASE wu.role WHEN $1 THEN 'a' END) FILTER (WHERE wu.role IS NOT NULL), ARRAY[]::text[]) AS roles FROM org.workspace_user wu JOIN org.organization_user ON wu.org_user_id = organization_user.id GROUP BY wu.org_user_id) SELECT * FROM r`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "wu.") {
+		t.Errorf("wu. refs not rewritten (FILTER and/or CASE arg): %q", got)
+	}
+}
+
 func TestReshapeUnionBothArms(t *testing.T) {
 	a, err := Normalize("SELECT u.id FROM users u UNION SELECT o.user_id FROM orders o")
 	if err != nil {
@@ -222,5 +310,34 @@ func TestReshapeUnionBothArms(t *testing.T) {
 	}
 	if a != b {
 		t.Errorf("UNION arms did not collapse to the same form:\n  a: %q\n  b: %q", a, b)
+	}
+}
+
+// INSERT statements have their own WithClause — the fixup walker needs to
+// descend into it. Regression: extract($N FROM …) inside a CTE on an
+// INSERT survived normalize and later broke PREPARE with "syntax error
+// at or near $N" (the EXTRACT field must be an identifier, not a param).
+func TestReshapeInsertWithClauseGetsFixups(t *testing.T) {
+	sql := `WITH c AS (SELECT r FROM t gs WHERE extract($1 FROM gs) NOT IN ($2, $3)) INSERT INTO x SELECT * FROM c`
+	got, err := Normalize(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "extract ($") || strings.Contains(got, "extract($") {
+		t.Errorf("extract($N …) not fixed inside INSERT's CTE: %q", got)
+	}
+}
+
+// extract() nested inside COALESCE/round() — walkFixups didn't descend
+// into CoalesceExpr / RowExpr / MinMaxExpr / AArrayExpr or into
+// SubLink/RangeSubselect/RangeFunction/JoinExpr. Real corpus hit this as
+// COALESCE(round(extract($N FROM upper(col)))).
+func TestReshapeExtractInsideCoalesceGetsFixed(t *testing.T) {
+	got, err := Normalize(`SELECT COALESCE(round(extract($1 FROM col)), 0) FROM t`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "extract ($") || strings.Contains(got, "extract($") {
+		t.Errorf("extract($N) inside COALESCE(round(...)) not fixed: %q", got)
 	}
 }

@@ -63,6 +63,10 @@ FROM pg_stat_statements s`)
 	}
 	where = append(where, fmt.Sprintf("s.calls > $%d", len(args)+1))
 	args = append(args, minCalls)
+	// Skip session/meta statements: they can't be PREPAREd (DISCARD,
+	// BEGIN/COMMIT, SET, SHOW, VACUUM, ANALYZE, reload) and qshape's own
+	// EXPLAIN / PREPARE / DEALLOCATE probes pollute pg_stat_statements.
+	where = append(where, `s.query !~* '^\s*(discard|begin|start|commit|rollback|savepoint|release|set|reset|show|listen|unlisten|notify|checkpoint|vacuum|analyze|reindex|cluster|explain|prepare|deallocate|execute|close|fetch|move|lock)\M'`)
 	sb.WriteString("\nWHERE ")
 	sb.WriteString(strings.Join(where, " AND "))
 	sb.WriteString("\nORDER BY s.total_exec_time DESC")
