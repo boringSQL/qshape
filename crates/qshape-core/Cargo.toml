@@ -7,4 +7,5 @@ repository.workspace = true
 
 [dependencies]
 pg_query = "6.1"
+prost = "0.13"
 thiserror.workspace = true

@@ -1,7 +1,7 @@
 use crate::error::Result;
 
-// TODO reshape do be done later
 pub fn normalize(sql: &str) -> Result<String> {
-    let tree = pg_query::parse(sql)?;
-    Ok(tree.deparse()?)
+    let mut result = pg_query::parse(sql)?;
+    crate::reshape::reshape(&mut result.protobuf);
+    Ok(pg_query::deparse(&result.protobuf)?)
 }
