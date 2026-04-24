@@ -20,6 +20,12 @@ enum Command {
         /// SQL to fingerprint; `-` or absent reads stdin.
         sql: Option<String>,
     },
+
+    /// Normalize a SQL statement (pass `-` or omit to read stdin).
+    Normalize {
+        /// SQL to normalize; `-` or absent reads stdin.
+        sql: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -36,6 +42,14 @@ fn main() -> Result<()> {
             };
             let fp = qshape_core::fingerprint(input.trim())?;
             println!("{fp}");
+        }
+        Command::Normalize { sql } => {
+            let input = match sql.as_deref() {
+                Some("-") | None => read_stdin()?,
+                Some(s) => s.to_string(),
+            };
+            let out = qshape_core::normalize(input.trim())?;
+            println!("{out}");
         }
     }
 
