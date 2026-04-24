@@ -286,3 +286,64 @@ fn sort_and_tree(n: &mut Node) {
 fn arg_sort_key(n: &Node) -> Vec<u8> {
     n.encode_to_vec()
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::normalize::normalize;
+
+    #[test]
+    fn sorts_flat_and_tree() {
+        let a = normalize("SELECT id FROM users WHERE a = $1 AND b = $2").unwrap();
+        let b = normalize("SELECT id FROM users WHERE b = $2 AND a = $1").unwrap();
+        assert_eq!(a, b, "reordered AND conjuncts did not collapse");
+    }
+
+    #[test]
+    fn sorts_three_way_and() {
+        let a = normalize("SELECT 1 FROM t WHERE c = $3 AND a = $1 AND b = $2").unwrap();
+        let b = normalize("SELECT 1 FROM t WHERE a = $1 AND b = $2 AND c = $3").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn idempotent_without_aliases() {
+        let cases = [
+            "SELECT id FROM users",
+            "SELECT id FROM users WHERE b = $1 AND a = $2 AND c = $3",
+            "UPDATE users SET name = $1 WHERE id = $2",
+            "WITH recent AS (SELECT id FROM users) SELECT id FROM recent",
+        ];
+        for sql in cases {
+            let first = normalize(sql).unwrap_or_else(|e| panic!("{sql:?}: {e}"));
+            let second = normalize(&first).unwrap_or_else(|e| panic!("{first:?}: {e}"));
+            assert_eq!(first, second, "not idempotent for {sql:?}");
+        }
+    }
+
+    // Exercises the larg/rarg recursion path inside reshape_select.
+    #[test]
+    fn union_is_idempotent() {
+        let sql = "SELECT id FROM users UNION SELECT user_id FROM orders";
+        let first = normalize(sql).unwrap();
+        let second = normalize(&first).unwrap();
+        assert_eq!(first, second);
+    }
+
+    // Param numbering is query-wide, not per-scope: a subquery must not
+    // restart at $1. This guards against moving renumber_params inside
+    // reshape_select.
+    #[test]
+    fn params_stay_query_wide_across_subselect() {
+        let sql =
+            "SELECT id FROM users WHERE id = $1 AND tenant_id IN (SELECT t FROM tenants WHERE t = $2)";
+        let out = normalize(sql).unwrap();
+        assert!(out.contains("$1") && out.contains("$2"), "got: {out}");
+    }
+
+    // LIMIT $N lives in limit_count — easy to miss when porting a walker.
+    #[test]
+    fn limit_param_survives_renumber() {
+        let out = normalize("SELECT * FROM t LIMIT $1").unwrap();
+        assert!(out.contains("LIMIT $1"), "got: {out}");
+    }
+}
