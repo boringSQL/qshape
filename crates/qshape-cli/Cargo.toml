@@ -1,0 +1,15 @@
+[package]
+name = "qshape-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "qshape"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+qshape-core = { path = "../qshape-core" }
