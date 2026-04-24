@@ -1,4 +1,3 @@
-crates/qshape-core/src/lib.rs
 use crate::error::Result;
 
 // TODO reshape do be done later
