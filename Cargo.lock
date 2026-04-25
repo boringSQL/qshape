@@ -545,6 +545,8 @@ version = "0.2.0"
 dependencies = [
  "pg_query",
  "prost",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
