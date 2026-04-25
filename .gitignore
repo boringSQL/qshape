@@ -1,7 +1,3 @@
-/bin/
-/dist/
-/qshape
-*.test
-*.out
-clusters.json
 /target
+/dist/
+clusters.json

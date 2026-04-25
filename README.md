@@ -21,7 +21,7 @@ distinct shapes.
 On one real production snapshot we measured **4,716 distinct queryids
 to 177 canonical fingerprints (96.2% reduction)** — an outlier, driven
 by heavy ORM alias churn on a small set of underlying query shapes.
-See `reshape.go` for the AST transformations that drive the collapse.
+See `crates/qshape-core/src/reshape.rs` for the AST transformations that drive the collapse.
 
 ## Install
 
@@ -34,7 +34,7 @@ brew install boringsql/boringsql/qshape
 From source:
 
 ```
-go install github.com/boringsql/qshape/cmd/qshape@latest
+cargo install --path crates/qshape-cli
 ```
 
 Pre-built binaries for macOS and Linux (amd64 + arm64) are published on
