@@ -7,7 +7,8 @@ mod normalize;
 mod reshape;
 
 pub use cluster::{
-    CURRENT_SCHEMA_VERSION, Cluster, ClustersDoc, ParamAttribution, Query, load_clusters_doc,
+    CURRENT_SCHEMA_VERSION, Cluster, ClustersDoc, ParamAttribution, Query, group,
+    load_clusters_doc,
 };
 pub use error::{Error, Result};
 pub use fingerprint::fingerprint;
