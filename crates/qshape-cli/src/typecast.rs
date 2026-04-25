@@ -17,6 +17,10 @@ impl<'a> TypecastCache<'a> {
         Self { client, cache: HashMap::new() }
     }
 
+    pub fn client_mut(&mut self) -> &mut Client {
+        self.client
+    }
+
     // closure adapter for `qshape_core::cast_func_param_refs`
     pub fn lookup(&mut self) -> impl FnMut(&str, &str, usize) -> Option<Vec<String>> + '_ {
         |schema: &str, name: &str, nargs: usize| {

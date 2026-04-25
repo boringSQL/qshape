@@ -14,4 +14,6 @@ anyhow.workspace = true
 clap.workspace = true
 postgres = "0.19"
 qshape-core = { path = "../qshape-core" }
+regex.workspace = true
+serde.workspace = true
 serde_json.workspace = true

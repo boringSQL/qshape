@@ -3,6 +3,7 @@ use std::io::{self, Read};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+mod attribute;
 mod capture;
 mod typecast;
 
@@ -32,6 +33,24 @@ enum Command {
     Normalize {
         /// SQL to normalize; `-` or absent reads stdin.
         sql: Option<String>,
+    },
+
+    /// Attribute $N placeholders in a clusters.json to table.column
+    ///
+    /// Reads clusters.json (from --in or stdin), runs EXPLAIN(GENERIC_PLAN)
+    /// on each cluster's canonical SQL via PREPARE+EXPLAIN EXECUTE, walks
+    /// the plan tree to map $N to (schema, table, column), and writes the
+    /// input back to stdout with a `params` array per cluster
+    Attribute {
+        /// PostgreSQL connection string
+        #[arg(long)]
+        conn: String,
+        /// Input clusters.json (default: stdin)
+        #[arg(long)]
+        r#in: Option<String>,
+        /// Only attribute the top N clusters (0 = all)
+        #[arg(long, default_value_t = 0)]
+        top: usize,
     },
 
     /// Fetch pg_stat_statements (with timing) from a live PG and cluster it
@@ -75,6 +94,9 @@ fn main() -> Result<()> {
         }
         Command::Capture { conn, min_calls, limit, database } => {
             capture::run(&conn, min_calls, limit, database.as_deref())?;
+        }
+        Command::Attribute { conn, r#in, top } => {
+            attribute::run(r#in.as_deref(), &conn, top)?;
         }
     }
 

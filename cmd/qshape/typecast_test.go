@@ -1,4 +1,4 @@
-cmd/qshape/typecast.gopackage main
+package main
 
 import (
 	"context"

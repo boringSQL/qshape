@@ -867,6 +867,8 @@ dependencies = [
  "clap",
  "postgres",
  "qshape-core",
+ "regex",
+ "serde",
  "serde_json",
 ]
 
