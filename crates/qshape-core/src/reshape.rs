@@ -919,6 +919,57 @@ mod tests {
         assert!(!got.contains("o.options"), "o.options not rewritten: {got}");
     }
 
+    // --- UPDATE/DELETE alias stripping --------------------------------------
+
+    #[test]
+    fn update_strips_alias() {
+        let got = normalize("UPDATE users u SET name = $1 WHERE u.id = $2").unwrap();
+        assert_eq!(got, "UPDATE users SET name = $1 WHERE id = $2");
+    }
+
+    #[test]
+    fn delete_strips_alias() {
+        let got = normalize("DELETE FROM users u WHERE u.id = $1").unwrap();
+        assert_eq!(got, "DELETE FROM users WHERE id = $1");
+    }
+
+    #[test]
+    fn update_with_from_canonicalises_aliases() {
+        let got = normalize("UPDATE users u SET name = $1 FROM orders o WHERE o.user_id = u.id")
+            .unwrap();
+        assert_eq!(
+            got,
+            "UPDATE users SET name = $1 FROM orders WHERE orders.user_id = users.id"
+        );
+    }
+
+    // INSERT statements have their own WithClause — fixup walker must descend.
+    #[test]
+    fn insert_with_clause_gets_fixups() {
+        let sql = "WITH c AS (SELECT r FROM t gs WHERE extract($1 FROM gs) NOT IN ($2, $3)) INSERT INTO x SELECT * FROM c";
+        let got = normalize(sql).unwrap();
+        assert!(!got.contains("extract($") && !got.contains("extract ($"), "got: {got}");
+    }
+
+    // extract() nested inside COALESCE/round() — fixup must descend into
+    // CoalesceExpr to reach the inner FuncCall.
+    #[test]
+    fn extract_inside_coalesce_gets_fixed() {
+        let got = normalize("SELECT COALESCE(round(extract($1 FROM col)), 0) FROM t").unwrap();
+        assert!(!got.contains("extract($") && !got.contains("extract ($"), "got: {got}");
+    }
+
+    // CoalesceExpr → FuncCall → FuncCall → ColumnRef. Before fix, outer
+    // CoalesceExpr was skipped so c.oid was never reached.
+    #[test]
+    fn coalesce_with_nested_func_call_ref() {
+        let got = normalize(
+            "SELECT COALESCE(sum(pg_stat_get_live_tuples(c.oid)), $1) FROM pg_class c LEFT JOIN pg_namespace ON pg_namespace.oid = c.relnamespace WHERE c.relkind = $2",
+        )
+        .unwrap();
+        assert!(!got.contains("c.oid"), "c.oid not rewritten: {got}");
+    }
+
     #[test]
     fn agg_filter_and_case_expr_refs_rewritten() {
         // FILTER lands in FuncCall.agg_filter, not args. Also exercises
