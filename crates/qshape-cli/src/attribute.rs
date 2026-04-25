@@ -305,3 +305,164 @@ fn record_param(
         },
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> AttrCtx {
+        AttrCtx { by_position: HashMap::new() }
+    }
+
+    fn aliases<const N: usize>(items: [(&str, &str, &str); N]) -> HashMap<String, TableRef> {
+        items
+            .into_iter()
+            .map(|(k, schema, table)| {
+                (k.to_string(), TableRef { schema: schema.to_string(), table: table.to_string() })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn aliased_equal() {
+        let mut c = ctx();
+        let a = aliases([("u", "auth", "user_account")]);
+        attribute_cond("(u.user_id = $1)", &a, "auth", "user_account", &mut c);
+
+        let p = c.by_position.get(&1).expect("param 1 attributed");
+        assert_eq!(p.schema, "auth");
+        assert_eq!(p.table, "user_account");
+        assert_eq!(p.column, "user_id");
+        assert_eq!(p.confidence, "exact");
+    }
+
+    // PG emits bare column names in plan text when scan is unambiguous.
+    // Plan node pins column to its relation — exact, not a guess
+    #[test]
+    fn unqualified_on_scan_is_exact() {
+        let mut c = ctx();
+        let a = aliases([("session", "auth", "session")]);
+        attribute_cond("(id = $1)", &a, "auth", "session", &mut c);
+
+        let p = c.by_position.get(&1).expect("param 1 attributed");
+        assert_eq!(p.table, "session");
+        assert_eq!(p.column, "id");
+        assert_eq!(p.confidence, "exact");
+    }
+
+    // Qualifier that doesn't resolve (outer-scope ref, schema-qualified
+    // name, subplan name) — best-guess to current relation as heuristic
+    #[test]
+    fn mismatched_qualifier_is_heuristic() {
+        let mut c = ctx();
+        attribute_cond("(outer_alias.id = $1)", &HashMap::new(), "auth", "session", &mut c);
+
+        let p = c.by_position.get(&1).expect("param 1 attributed");
+        assert_eq!(p.confidence, "heuristic");
+    }
+
+    #[test]
+    fn multiple_params() {
+        let mut c = ctx();
+        let a = aliases([("t", "auth", "oauth_token")]);
+        attribute_cond(
+            "((t.access_sha = $2) AND (t.access_hash = hashtext($1)))",
+            &a,
+            "auth",
+            "oauth_token",
+            &mut c,
+        );
+
+        let p2 = c.by_position.get(&2).expect("param 2 attributed");
+        assert_eq!(p2.column, "access_sha");
+        // $1 wrapped in hashtext(...) — no direct column comparison, OK
+        // either way that the regex misses it
+    }
+
+    // PG plans system views like pg_catalog.pg_settings as Function Scan.
+    // Plan node has no "Relation Name" but carries view name in Alias —
+    // walk_plan must still attribute conds on that node
+    #[test]
+    fn function_scan_with_alias_only() {
+        let plan: serde_json::Value = serde_json::from_str(
+            r#"{
+                "Node Type": "Function Scan",
+                "Function Name": "pg_show_all_settings",
+                "Alias": "pg_settings",
+                "Filter": "(name = $1)"
+            }"#,
+        )
+        .unwrap();
+        let mut c = ctx();
+        walk_plan(&plan, "", "", &mut c);
+
+        let p = c.by_position.get(&1).expect("param 1 attributed via Alias fallback");
+        assert_eq!(p.table, "pg_settings");
+        assert_eq!(p.column, "name");
+        assert_eq!(p.confidence, "exact");
+    }
+
+    #[test]
+    fn preserves_exact_over_heuristic() {
+        let mut c = ctx();
+        let a = aliases([("u", "auth", "user_account")]);
+        attribute_cond("(u.user_id = $1)", &a, "", "", &mut c);
+        // second hit that would be heuristic on different relation
+        attribute_cond("(user_id = $1)", &HashMap::new(), "public", "other_table", &mut c);
+
+        let p = c.by_position.get(&1).expect("param 1 attributed");
+        assert_eq!(p.table, "user_account");
+        assert_eq!(p.confidence, "exact");
+    }
+
+    // IN-list pattern: column IN ($N, $M, ...) attributes only first param
+    #[test]
+    fn in_list_attributes_first_param() {
+        let mut c = ctx();
+        let a = aliases([("u", "auth", "user_account")]);
+        attribute_cond("(u.id IN ($3, $4, $5))", &a, "auth", "user_account", &mut c);
+
+        let p = c.by_position.get(&3).expect("param 3 attributed");
+        assert_eq!(p.column, "id");
+        assert_eq!(p.confidence, "exact");
+        assert!(c.by_position.get(&4).is_none());
+    }
+
+    // Reverse form: $N op column instead of column op $N
+    #[test]
+    fn reverse_form_param_first() {
+        let mut c = ctx();
+        let a = aliases([("u", "auth", "user_account")]);
+        attribute_cond("($1 = u.email)", &a, "auth", "user_account", &mut c);
+
+        let p = c.by_position.get(&1).expect("param 1 attributed");
+        assert_eq!(p.column, "email");
+        assert_eq!(p.confidence, "exact");
+    }
+
+    // walk_plan recurses into nested Plans
+    #[test]
+    fn walk_plan_descends_into_children() {
+        let plan: serde_json::Value = serde_json::from_str(
+            r#"{
+                "Node Type": "Hash Join",
+                "Hash Cond": "(orders.user_id = users.id)",
+                "Plans": [
+                    {
+                        "Node Type": "Seq Scan",
+                        "Relation Name": "users",
+                        "Alias": "users",
+                        "Filter": "(email = $1)"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut c = ctx();
+        walk_plan(&plan, "", "", &mut c);
+
+        let p = c.by_position.get(&1).expect("param 1 from child Seq Scan");
+        assert_eq!(p.table, "users");
+        assert_eq!(p.column, "email");
+    }
+}
