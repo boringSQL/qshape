@@ -683,4 +683,152 @@ mod tests {
         let second = normalize(&first).unwrap();
         assert_eq!(first, second);
     }
+
+    // --- SELECT alias stripping (ported from reshape_test.go) ---------------
+
+    use crate::fingerprint::fingerprint;
+
+    #[test]
+    fn strips_single_table_alias() {
+        let got = normalize("SELECT u.id, u.name FROM users u WHERE u.id = $1").unwrap();
+        assert_eq!(got, "SELECT id, name FROM users WHERE id = $1");
+    }
+
+    #[test]
+    fn leaves_unaliased_unchanged() {
+        let got = normalize("SELECT id FROM users WHERE id = $1").unwrap();
+        assert_eq!(got, "SELECT id FROM users WHERE id = $1");
+    }
+
+    #[test]
+    fn orm_variants_collapse() {
+        let a = fingerprint("SELECT id, name FROM users WHERE id = $1").unwrap();
+        let b = fingerprint("SELECT u.id, u.name FROM users u WHERE u.id = $1").unwrap();
+        assert_eq!(a, b, "aliased and unaliased should fingerprint the same");
+    }
+
+    #[test]
+    fn join_canonicalises_aliases_to_relname() {
+        // Multi-relation scope: can't strip to bare (ambiguous) but can
+        // canonicalise `u.col` / `users.col` to the same form.
+        let got = normalize(
+            "SELECT u.id, o.total FROM users u INNER JOIN orders o ON o.user_id = u.id WHERE u.tenant = $1",
+        )
+        .unwrap();
+        let want = "SELECT users.id, orders.total FROM users JOIN orders ON orders.user_id = users.id WHERE users.tenant = $1";
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn join_aliased_and_unaliased_collapse() {
+        let a = fingerprint("SELECT u.id, o.total FROM users u JOIN orders o ON o.user_id = u.id")
+            .unwrap();
+        let b = fingerprint(
+            "SELECT users.id, orders.total FROM users JOIN orders ON orders.user_id = users.id",
+        )
+        .unwrap();
+        assert_eq!(a, b, "alias and relname variants should collapse");
+    }
+
+    #[test]
+    fn self_join_preserves_aliases() {
+        // Both aliases must stay — otherwise the join is ambiguous.
+        let got =
+            normalize("SELECT a.id FROM users a INNER JOIN users b ON a.id = b.parent_id").unwrap();
+        assert_eq!(got, "SELECT a.id FROM users a JOIN users b ON a.id = b.parent_id");
+    }
+
+    #[test]
+    fn range_subselect_alias_required() {
+        // SQL syntactically requires the alias on a subselect in FROM.
+        let got = normalize("SELECT s.id FROM (SELECT id FROM users) s").unwrap();
+        assert_eq!(got, "SELECT s.id FROM (SELECT id FROM users) s");
+    }
+
+    #[test]
+    fn correlated_subquery_rewrites_outer_ref() {
+        // Outer `u` stripped; correlated `u.id` inside subquery must also
+        // be rewritten, or the deparsed SQL references a missing alias.
+        let got = normalize(
+            "SELECT u.id FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)",
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = id)"
+        );
+    }
+
+    #[test]
+    fn cte_gets_own_scope() {
+        let got = normalize(
+            "WITH recent AS (SELECT u.id FROM users u WHERE u.created_at > $1) SELECT r.id FROM recent r",
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            "WITH recent AS (SELECT id FROM users WHERE created_at > $1) SELECT id FROM recent"
+        );
+    }
+
+    #[test]
+    fn cte_used_in_outer_join_keeps_aliases() {
+        // Outer scope has the CTE ref + another table; both expose user_id.
+        // Stripping the `s` alias would leave an ambiguous bare `user_id`.
+        let in_sql = "WITH ur AS (SELECT ua.user_id FROM auth.user_account ua WHERE ua.user_id = $1) \
+                      SELECT ur.user_id FROM ur JOIN sessions s ON s.user_id = ur.user_id";
+        let got = normalize(in_sql).unwrap();
+        let want = "WITH ur AS (SELECT user_id FROM auth.user_account WHERE user_id = $1) \
+                    SELECT ur.user_id FROM ur JOIN sessions ON sessions.user_id = ur.user_id";
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn comma_join_canonicalises_aliases() {
+        let got = normalize("SELECT a.id FROM users a, orders b WHERE a.id = b.user_id").unwrap();
+        assert_eq!(got, "SELECT users.id FROM users, orders WHERE users.id = orders.user_id");
+    }
+
+    #[test]
+    fn union_both_arms() {
+        let a = normalize("SELECT u.id FROM users u UNION SELECT o.user_id FROM orders o").unwrap();
+        let b = normalize("SELECT id FROM users UNION SELECT user_id FROM orders").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn correlated_ref_in_nested_subquery_from() {
+        // Outer alias `u` (decorative, stripped in outer scope) is referenced
+        // from a derived-table WHERE that lives inside a correlated subquery's
+        // FROM. rewrite_in_select must walk the subquery's FROM, not just its
+        // target list / WHERE, or the outer ref is left dangling.
+        let got = normalize(
+            "SELECT u.id, (SELECT x FROM (SELECT a.x FROM t a WHERE a.uid = u.id) sub) FROM updated u JOIN t2 p ON p.uid = u.id",
+        )
+        .unwrap();
+        assert!(!got.contains("u."), "outer alias `u` leaked: {got}");
+    }
+
+    #[test]
+    fn coalesce_args_get_rewritten() {
+        // COALESCE is parsed as CoalesceExpr, not FuncCall. rewrite_refs
+        // must walk its args or aliases inside COALESCE survive FROM
+        // stripping and deparse references a missing table.
+        let got = normalize(
+            "SELECT COALESCE(CAST(o.options -> $1 AS boolean), $2) FROM org.organization o LEFT JOIN org.workspace ON organization.id = workspace.org_id",
+        )
+        .unwrap();
+        assert!(!got.contains("o.options"), "o.options not rewritten: {got}");
+    }
+
+    #[test]
+    fn agg_filter_and_case_expr_refs_rewritten() {
+        // FILTER lands in FuncCall.agg_filter, not args. Also exercises
+        // alias refs inside a CASE inside array_agg.
+        let got = normalize(
+            "WITH r AS (SELECT COALESCE(array_agg(DISTINCT CASE wu.role WHEN $1 THEN 'a' END) FILTER (WHERE wu.role IS NOT NULL), ARRAY[]::text[]) AS roles FROM org.workspace_user wu JOIN org.organization_user ON wu.org_user_id = organization_user.id GROUP BY wu.org_user_id) SELECT * FROM r",
+        )
+        .unwrap();
+        assert!(!got.contains("wu."), "wu. refs not rewritten: {got}");
+    }
 }
