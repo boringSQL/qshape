@@ -48,7 +48,7 @@ pub fn run(in_path: Option<&str>, conn_str: &str, top: usize) -> Result<()> {
                 skipped += 1;
                 c.params = vec![ParamAttribution {
                     confidence: "none".to_string(),
-                    note: e.to_string(),
+                    note: format!("{e:#}"),
                     ..ParamAttribution::default()
                 }];
             }
