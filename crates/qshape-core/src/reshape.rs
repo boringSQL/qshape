@@ -8,6 +8,7 @@ pub(crate) fn reshape(tree: &mut ParseResult) {
     for raw in &mut tree.stmts {
         if let Some(stmt) = raw.stmt.as_deref_mut() {
             reshape_node(stmt);
+            walk_fixups(stmt);
             renumber_params(stmt);
         }
     }
@@ -103,6 +104,54 @@ fn reshape_nested_from_item(n: &mut Node) {
         }
         _ => {}
     }
+}
+
+// --- AST fixups -------------------------------------------------------------
+
+fn walk_fixups(n: &mut Node) {
+    if let Some(NodeEnum::FuncCall(fc)) = n.node.as_mut() {
+        fix_extract_field_ident(fc);
+    }
+    for_each_child(n, &mut walk_fixups);
+}
+
+fn is_pg_catalog_extract(fc: &FuncCall) -> bool {
+    if fc.funcname.len() != 2 {
+        return false;
+    }
+    let Some(NodeEnum::String(s0)) = fc.funcname[0].node.as_ref() else {
+        return false;
+    };
+    let Some(NodeEnum::String(s1)) = fc.funcname[1].node.as_ref() else {
+        return false;
+    };
+    s0.sval == "pg_catalog"
+        && s1.sval == "extract"
+        && fc.funcformat == CoercionForm::CoerceSqlSyntax as i32
+}
+
+// change EXTRACT's field from a string constant to a bare identifier. I.e.
+// `epoch` becomes string, and is later emitted quoted. Can't decide whatever
+// that's real bug in pg_query or strange case in test queries used.
+fn fix_extract_field_ident(fc: &mut FuncCall) {
+    if !is_pg_catalog_extract(fc) || fc.args.is_empty() {
+        return;
+    }
+
+    let ident = match fc.args[0].node.as_ref() {
+        Some(NodeEnum::AConst(AConst { val: Some(a_const::Val::Sval(s)), .. })) => s.sval.clone(),
+        Some(NodeEnum::ParamRef(_)) => "epoch".to_string(),
+        _ => return,
+    };
+
+    fc.args[0] = Node {
+        node: Some(NodeEnum::ColumnRef(ColumnRef {
+            fields: vec![Node {
+                node: Some(NodeEnum::String(pg_query::protobuf::String { sval: ident })),
+            }],
+            location: -1,
+        })),
+    };
 }
 
 // --- param renumber ---------------------------------------------------------
