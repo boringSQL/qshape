@@ -158,3 +158,128 @@ pub fn group(queries: Vec<Query>) -> Result<Vec<Cluster>> {
 
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn q(raw: &str, calls: i64) -> Query {
+        Query { raw: raw.to_string(), calls, ..Query::default() }
+    }
+
+    #[test]
+    fn aggregates_calls() {
+        let out = group(vec![
+            q("SELECT id FROM users WHERE id = 1", 100),
+            q("SELECT id FROM users WHERE id = 99", 200),
+        ])
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].total_calls, 300);
+        assert_eq!(out[0].members.len(), 2);
+    }
+
+    #[test]
+    fn aggregates_timing() {
+        let out = group(vec![
+            Query {
+                raw: "SELECT id FROM users WHERE id = 1".to_string(),
+                calls: 100,
+                total_exec_time_ms: 250.0,
+                rows: 100,
+                ..Query::default()
+            },
+            Query {
+                raw: "SELECT id FROM users WHERE id = 99".to_string(),
+                calls: 400,
+                total_exec_time_ms: 750.0,
+                rows: 400,
+                ..Query::default()
+            },
+        ])
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].total_exec_time_ms, 1000.0);
+        assert_eq!(out[0].rows, 500);
+        assert_eq!(out[0].mean_exec_time_ms, 1000.0 / 500.0);
+    }
+
+    #[test]
+    fn sorts_by_timing_when_present() {
+        let out = group(vec![
+            Query {
+                raw: "SELECT id FROM users".to_string(),
+                calls: 1000,
+                total_exec_time_ms: 50.0,
+                ..Query::default()
+            },
+            Query {
+                raw: "SELECT name FROM users".to_string(),
+                calls: 10,
+                total_exec_time_ms: 5000.0,
+                ..Query::default()
+            },
+        ])
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(
+            out[0].total_exec_time_ms >= out[1].total_exec_time_ms,
+            "expected sort by total_exec_time_ms desc"
+        );
+    }
+
+    #[test]
+    fn sorts_by_calls_when_no_timing() {
+        let out = group(vec![
+            q("SELECT name FROM users", 10),
+            q("SELECT id FROM users", 500),
+        ])
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out[0].total_calls >= out[1].total_calls);
+    }
+
+    // Alias-only variants collapse (reshape strips decorative aliases);
+    // the LIMIT variant stays in its own cluster because LIMIT changes
+    // plan shape and LIMIT subsumption is out of scope.
+    #[test]
+    fn orm_variants_current_behavior() {
+        let out = group(vec![
+            q("SELECT id, name FROM users WHERE id = $1", 1),
+            q("SELECT u.id, u.name FROM users u WHERE u.id = $1", 1),
+            q("SELECT id, name FROM users WHERE id = $1 LIMIT $2", 1),
+        ])
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        let total: i64 = out.iter().map(|c| c.total_calls).sum();
+        assert_eq!(total, 3);
+    }
+
+    // Alias-only, optional AS, and AND-predicate reorder all collapse.
+    #[test]
+    fn orm_variants_collapse() {
+        let inputs = [
+            "SELECT id, name FROM users WHERE id = $1 AND status = $2",
+            "SELECT id, name FROM users WHERE status = $2 AND id = $1",
+            "SELECT u.id, u.name FROM users u WHERE u.id = $1 AND u.status = $2",
+            "SELECT u.id, u.name FROM users AS u WHERE u.status = $2 AND u.id = $1",
+        ];
+        let out = group(inputs.iter().map(|s| q(s, 1)).collect()).unwrap();
+        assert_eq!(out.len(), 1, "got: {out:#?}");
+        assert_eq!(out[0].total_calls, inputs.len() as i64);
+    }
+
+    #[test]
+    fn unparseable_becomes_singleton() {
+        let out = group(vec![q("SELECT FROM WHERE", 5)]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].fingerprint, "");
+        assert_eq!(out[0].canonical, "SELECT FROM WHERE");
+    }
+
+    #[test]
+    fn empty_input() {
+        let out = group(Vec::new()).unwrap();
+        assert!(out.is_empty());
+    }
+}
