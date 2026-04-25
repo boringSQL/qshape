@@ -4,7 +4,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "qshape", version, about = "Normalize, fingerprint, and cluster PostgreSQL queries")]
+#[command(
+    name = "qshape",
+    version,
+    about = "Normalize, fingerprint, and cluster PostgreSQL queries"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
