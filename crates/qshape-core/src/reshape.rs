@@ -395,4 +395,36 @@ mod tests {
         let out = normalize("SELECT * FROM t LIMIT $1").unwrap();
         assert!(out.contains("LIMIT $1"), "got: {out}");
     }
+
+    // EXTRACT's field must deparse as a bare identifier, not a quoted
+    // string. Otherwise downstream literal-parameterisers break the SQL.
+    #[test]
+    fn extract_field_stays_identifier() {
+        let out =
+            normalize("SELECT auth.f(extract(epoch FROM '1 hour'::interval)::bigint, 100)")
+                .unwrap();
+        assert!(out.contains("extract (epoch FROM"), "got: {out}");
+        assert!(!out.contains("'epoch'"), "field leaked as string literal: {out}");
+    }
+
+    // If the field arrived already parameterised, substitute a stable
+    // ident and let renumber_params close the resulting gap.
+    #[test]
+    fn extract_param_field_recovered() {
+        let out = normalize(
+            "SELECT auth.clean_up_sessions(extract($1 FROM $2::interval)::bigint, $3)",
+        )
+        .unwrap();
+        let want =
+            "SELECT auth.clean_up_sessions(extract (epoch FROM $1::interval)::bigint, $2)";
+        assert_eq!(out, want);
+    }
+
+    #[test]
+    fn extract_recovery_is_idempotent() {
+        let sql = "SELECT extract($1 FROM $2::interval), $3 FROM t";
+        let first = normalize(sql).unwrap();
+        let second = normalize(&first).unwrap();
+        assert_eq!(first, second);
+    }
 }
