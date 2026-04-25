@@ -7,6 +7,8 @@ use qshape_core::{CURRENT_SCHEMA_VERSION, ClustersDoc, Query, group};
 // Skip session/meta statements
 const SKIP_META_REGEX: &str = r"^\s*(discard|begin|start|commit|rollback|savepoint|release|set|reset|show|listen|unlisten|notify|checkpoint|vacuum|analyze|reindex|cluster|explain|prepare|deallocate|execute|close|fetch|move|lock)\M";
 
+const PG_STAT_STATEMENTS_SQL: &str = include_str!("../sql/pg_stat_statements.sql");
+
 pub fn run(conn_str: &str, min_calls: i64, limit: i32, database: Option<&str>) -> Result<()> {
     let mut client = Client::connect(conn_str, NoTls).context("connect")?;
 
@@ -52,9 +54,7 @@ pub fn run(conn_str: &str, min_calls: i64, limit: i32, database: Option<&str>) -
 }
 
 fn build_sql(has_database: bool, limit: i32) -> String {
-    let mut sql = String::from(
-        "SELECT s.queryid, s.calls, s.query, s.total_exec_time, s.mean_exec_time, s.stddev_exec_time, s.rows FROM pg_stat_statements s",
-    );
+    let mut sql = String::from(PG_STAT_STATEMENTS_SQL.trim_end());
     let mut where_clauses: Vec<String> = Vec::new();
     let mut next_param = 1;
     if has_database {

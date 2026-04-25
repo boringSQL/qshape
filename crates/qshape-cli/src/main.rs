@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 mod capture;
+mod typecast;
 
 #[derive(Debug, Parser)]
 #[command(

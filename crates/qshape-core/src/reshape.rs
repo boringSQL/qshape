@@ -541,21 +541,21 @@ fn apply_param_remap(n: &mut Node, remap: &HashMap<i32, i32>) {
 
 // --- forEachChild -----------------------------------------------------------
 
-type NodeFn<'a> = &'a mut dyn FnMut(&mut Node);
+pub(crate) type NodeFn<'a> = &'a mut dyn FnMut(&mut Node);
 
-fn visit(n: Option<&mut Node>, f: NodeFn<'_>) {
+pub(crate) fn visit(n: Option<&mut Node>, f: NodeFn<'_>) {
     if let Some(n) = n {
         f(n);
     }
 }
 
-fn visit_all(ns: &mut [Node], f: NodeFn<'_>) {
+pub(crate) fn visit_all(ns: &mut [Node], f: NodeFn<'_>) {
     for n in ns {
         f(n);
     }
 }
 
-fn for_each_child(n: &mut Node, f: NodeFn<'_>) {
+pub(crate) fn for_each_child(n: &mut Node, f: NodeFn<'_>) {
     match n.node.as_mut() {
         Some(NodeEnum::SelectStmt(s)) => for_each_select_child(s, f),
         Some(NodeEnum::UpdateStmt(u)) => {
@@ -625,7 +625,7 @@ fn for_each_child(n: &mut Node, f: NodeFn<'_>) {
     }
 }
 
-fn for_each_select_child(s: &mut SelectStmt, f: NodeFn<'_>) {
+pub(crate) fn for_each_select_child(s: &mut SelectStmt, f: NodeFn<'_>) {
     visit_all(&mut s.target_list, f);
     visit_all(&mut s.from_clause, f);
     visit(s.where_clause.as_deref_mut(), f);
