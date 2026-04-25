@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::string::String;
 
 use pg_query::NodeEnum;
 use pg_query::protobuf::*;
@@ -24,18 +25,53 @@ fn reshape_node(n: &mut Node) {
 }
 
 fn reshape_select(s: &mut SelectStmt) {
+    // first nested scoped
     reshape_nested_from(&mut s.from_clause);
     if let Some(w) = s.with_clause.as_mut() {
         reshape_with_clause(w);
     }
-    if let Some(l) = s.larg.as_mut() {
+    if let Some(l) = s.larg.as_deref_mut() {
         reshape_select(l);
     }
-    if let Some(r) = s.rarg.as_mut() {
+    if let Some(r) = s.rarg.as_deref_mut() {
         reshape_select(r);
     }
+    reshape_sublinks_in_select(s);
 
-    // TODO: alias stripping + sublink reshape
+    // current scope
+    let entries = collect_scope(&s.from_clause);
+    let dec = decorative_aliases(&entries);
+    if !dec.is_empty() {
+        strip_aliases_in_from(&mut s.from_clause, &dec);
+        for n in &mut s.target_list {
+            rewrite_refs(n, &dec);
+        }
+        if let Some(w) = s.where_clause.as_deref_mut() {
+            rewrite_refs(w, &dec);
+        }
+        if let Some(h) = s.having_clause.as_deref_mut() {
+            rewrite_refs(h, &dec);
+        }
+        for n in &mut s.group_clause {
+            rewrite_refs(n, &dec);
+        }
+        for n in &mut s.sort_clause {
+            rewrite_refs(n, &dec);
+        }
+        for n in &mut s.distinct_clause {
+            rewrite_refs(n, &dec);
+        }
+        if let Some(n) = s.limit_offset.as_deref_mut() {
+            rewrite_refs(n, &dec);
+        }
+        if let Some(n) = s.limit_count.as_deref_mut() {
+            rewrite_refs(n, &dec);
+        }
+        // JoinExpr.Quals live inside FROM clause nodes
+        for n in &mut s.from_clause {
+            rewrite_refs(n, &dec);
+        }
+    }
 
     if let Some(w) = s.where_clause.as_deref_mut() {
         sort_and_tree(w);
@@ -104,6 +140,220 @@ fn reshape_nested_from_item(n: &mut Node) {
         }
         _ => {}
     }
+}
+
+// --- sublink reshape -------------------------------------------------------
+
+fn reshape_sublinks_in_select(s: &mut SelectStmt) {
+    if let Some(w) = s.where_clause.as_deref_mut() {
+        reshape_sublinks(w);
+    }
+    if let Some(h) = s.having_clause.as_deref_mut() {
+        reshape_sublinks(h);
+    }
+    for n in &mut s.target_list {
+        reshape_sublinks(n);
+    }
+    for n in &mut s.from_clause {
+        reshape_join_quals_sublinks(n);
+    }
+}
+
+fn reshape_join_quals_sublinks(n: &mut Node) {
+    if let Some(NodeEnum::JoinExpr(j)) = n.node.as_mut() {
+        if let Some(q) = j.quals.as_deref_mut() {
+            reshape_sublinks(q);
+        }
+        if let Some(l) = j.larg.as_deref_mut() {
+            reshape_join_quals_sublinks(l);
+        }
+        if let Some(r) = j.rarg.as_deref_mut() {
+            reshape_join_quals_sublinks(r);
+        }
+    }
+}
+
+// Reshape all sublinks and recures rest. Go source actually
+// missed sublinks in functions like COALESCE, ARRAY, ROW and
+// aggregate FILTER/ORDER BY
+fn reshape_sublinks(n: &mut Node) {
+    match n.node.as_mut() {
+        Some(NodeEnum::SubLink(sl)) => {
+            if let Some(sub) = sl.subselect.as_deref_mut() {
+                reshape_node(sub);
+            }
+            if let Some(t) = sl.testexpr.as_deref_mut() {
+                reshape_sublinks(t);
+            }
+        }
+        _ => for_each_child(n, &mut reshape_sublinks),
+    }
+}
+
+// --- scope collection + alias stripping -------------------------------------
+
+struct ScopeEntry {
+    relname: String,
+    alias_name: String,
+    required: bool,
+}
+
+// Dec for alias replacement nodes.
+// - empty means drop alias
+// - non-empty means replace aliases with those nodes
+type Dec = HashMap<String, Vec<Node>>;
+
+fn collect_scope(items: &[Node]) -> Vec<ScopeEntry> {
+    let mut out = Vec::new();
+    for n in items {
+        collect_from_item(n, &mut out);
+    }
+    out
+}
+
+fn collect_from_item(n: &Node, out: &mut Vec<ScopeEntry>) {
+    match n.node.as_ref() {
+        Some(NodeEnum::RangeVar(rv)) => out.push(range_var_entry(rv)),
+        Some(NodeEnum::JoinExpr(j)) => {
+            if let Some(l) = j.larg.as_deref() {
+                collect_from_item(l, out);
+            }
+            if let Some(r) = j.rarg.as_deref() {
+                collect_from_item(r, out);
+            }
+        }
+        Some(NodeEnum::RangeSubselect(rs)) => {
+            let alias = rs.alias.as_ref().map(|a| a.aliasname.clone()).unwrap_or_default();
+            out.push(ScopeEntry { relname: String::new(), alias_name: alias, required: true });
+        }
+        Some(NodeEnum::RangeFunction(rf)) => {
+            let alias = rf.alias.as_ref().map(|a| a.aliasname.clone()).unwrap_or_default();
+            out.push(ScopeEntry { relname: String::new(), alias_name: alias, required: true });
+        }
+        _ => {}
+    }
+}
+
+fn range_var_entry(rv: &RangeVar) -> ScopeEntry {
+    let alias_name = match rv.alias.as_ref() {
+        Some(a) if a.colnames.is_empty() => a.aliasname.clone(),
+        _ => String::new(),
+    };
+    ScopeEntry { relname: rv.relname.clone(), alias_name, required: false }
+}
+
+fn decorative_aliases(entries: &[ScopeEntry]) -> Dec {
+    let mut rel_count: HashMap<&str, usize> = HashMap::new();
+    for e in entries {
+        if !e.relname.is_empty() {
+            *rel_count.entry(&e.relname).or_insert(0) += 1;
+        }
+    }
+
+    let single_relation = entries.len() == 1;
+    let mut out: Dec = HashMap::new();
+
+    for e in entries {
+        if e.alias_name.is_empty() || e.required {
+            continue;
+        }
+        if !e.relname.is_empty() && rel_count.get(e.relname.as_str()).copied().unwrap_or(0) > 1 {
+            continue;
+        }
+        if single_relation {
+            out.insert(e.alias_name.clone(), Vec::new());
+        } else if !e.relname.is_empty() {
+            out.insert(e.alias_name.clone(), vec![string_node(&e.relname)]);
+        }
+    }
+    out
+}
+
+fn string_node(s: &str) -> Node {
+    Node {
+        node: Some(NodeEnum::String(pg_query::protobuf::String { sval: s.to_string() })),
+    }
+}
+
+fn strip_aliases_in_from(items: &mut [Node], dec: &Dec) {
+    for n in items {
+        strip_alias_in_from_item(n, dec);
+    }
+}
+
+fn strip_alias_in_from_item(n: &mut Node, dec: &Dec) {
+    match n.node.as_mut() {
+        Some(NodeEnum::RangeVar(rv)) => {
+            if let Some(a) = rv.alias.as_ref()
+                && dec.contains_key(&a.aliasname)
+            {
+                rv.alias = None;
+            }
+        }
+        Some(NodeEnum::JoinExpr(j)) => {
+            if let Some(l) = j.larg.as_deref_mut() {
+                strip_alias_in_from_item(l, dec);
+            }
+            if let Some(r) = j.rarg.as_deref_mut() {
+                strip_alias_in_from_item(r, dec);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_refs(n: &mut Node, dec: &Dec) {
+    match n.node.as_mut() {
+        Some(NodeEnum::ColumnRef(cr)) => rewrite_column_ref(cr, dec),
+        Some(NodeEnum::SubLink(sl)) => {
+            if let Some(sub) = sl.subselect.as_deref_mut()
+                && let Some(NodeEnum::SelectStmt(s)) = sub.node.as_mut()
+            {
+                rewrite_in_select(s, dec);
+            }
+            if let Some(t) = sl.testexpr.as_deref_mut() {
+                rewrite_refs(t, dec);
+            }
+        }
+        Some(NodeEnum::RangeSubselect(rs)) => {
+            // LATERAL / derived-table subqueries may reference outer-scope
+            // aliases; their own scope was reshaped first, so any `u.x`
+            // left here is an outer-scope reference
+            if let Some(sub) = rs.subquery.as_deref_mut()
+                && let Some(NodeEnum::SelectStmt(s)) = sub.node.as_mut()
+            {
+                rewrite_in_select(s, dec);
+            }
+        }
+        _ => for_each_child(n, &mut |c| rewrite_refs(c, dec)),
+    }
+}
+
+fn rewrite_column_ref(cr: &mut ColumnRef, dec: &Dec) {
+    if cr.fields.len() < 2 {
+        return;
+    }
+    let Some(NodeEnum::String(s)) = cr.fields[0].node.as_ref() else {
+        return;
+    };
+    let Some(repl) = dec.get(&s.sval) else {
+        return;
+    };
+    let rest: Vec<Node> = cr.fields.drain(1..).collect();
+    cr.fields.clear();
+    cr.fields.extend(repl.iter().cloned());
+    cr.fields.extend(rest);
+}
+
+fn rewrite_in_select(s: &mut SelectStmt, dec: &Dec) {
+    let mut f: Box<dyn FnMut(&mut Node)> = Box::new(|n| rewrite_refs(n, dec));
+    visit_all(&mut s.target_list, &mut f);
+    visit(s.where_clause.as_deref_mut(), &mut f);
+    visit(s.having_clause.as_deref_mut(), &mut f);
+    visit_all(&mut s.group_clause, &mut f);
+    visit_all(&mut s.sort_clause, &mut f);
+    visit_all(&mut s.distinct_clause, &mut f);
+    visit_all(&mut s.from_clause, &mut f);
 }
 
 // --- AST fixups -------------------------------------------------------------
@@ -239,7 +489,11 @@ fn for_each_child(n: &mut Node, f: NodeFn<'_>) {
                 for_each_cte(w, f);
             }
         }
-        Some(NodeEnum::FuncCall(fc)) => visit_all(&mut fc.args, f),
+        Some(NodeEnum::FuncCall(fc)) => {
+            visit_all(&mut fc.args, f);
+            visit(fc.agg_filter.as_deref_mut(), f);
+            visit_all(&mut fc.agg_order, f);
+        }
         Some(NodeEnum::ResTarget(r)) => visit(r.val.as_deref_mut(), f),
         Some(NodeEnum::AExpr(a)) => {
             visit(a.lexpr.as_deref_mut(), f);
@@ -272,6 +526,8 @@ fn for_each_child(n: &mut Node, f: NodeFn<'_>) {
         Some(NodeEnum::SortBy(s)) => visit(s.node.as_deref_mut(), f),
         Some(NodeEnum::CoalesceExpr(c)) => visit_all(&mut c.args, f),
         Some(NodeEnum::MinMaxExpr(m)) => visit_all(&mut m.args, f),
+        Some(NodeEnum::AArrayExpr(a)) => visit_all(&mut a.elements, f),
+        Some(NodeEnum::RowExpr(r)) => visit_all(&mut r.args, f),
         _ => {}
     }
 }
