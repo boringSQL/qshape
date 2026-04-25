@@ -2,31 +2,22 @@
 //! on each cluster's canonical and walking the plan tree
 
 use std::collections::HashMap;
-use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow};
 use postgres::{Client, NoTls, SimpleQueryMessage};
 use qshape_core::{
-    CURRENT_SCHEMA_VERSION, ParamAttribution, cast_func_param_refs, load_clusters_doc,
-    max_param_number, normalize,
+    CURRENT_SCHEMA_VERSION, ParamAttribution, cast_func_param_refs, max_param_number, normalize,
 };
 use regex::Regex;
 use serde::Deserialize;
 
+use crate::loader::load_clusters;
 use crate::typecast::TypecastCache;
 
 pub fn run(in_path: Option<&str>, conn_str: &str, top: usize) -> Result<()> {
-    let bytes = match in_path {
-        Some(p) => fs::read(p).with_context(|| format!("read {p}"))?,
-        None => {
-            let mut buf = Vec::new();
-            io::stdin().read_to_end(&mut buf).context("read stdin")?;
-            buf
-        }
-    };
-    let mut doc = load_clusters_doc(&bytes).context("decode clusters.json")?;
+    let mut doc = load_clusters(in_path)?;
 
     let mut client = Client::connect(conn_str, NoTls).context("connect")?;
     let mut cache = TypecastCache::new(&mut client);

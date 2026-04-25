@@ -5,6 +5,8 @@ use clap::{Parser, Subcommand};
 
 mod attribute;
 mod capture;
+mod loader;
+mod regresql_stub;
 mod typecast;
 
 #[derive(Debug, Parser)]
@@ -53,6 +55,26 @@ enum Command {
         top: usize,
     },
 
+    /// Generate regresql sql/ skeletons from clusters.json
+    ///
+    /// For each of the top N clusters, writes <out>/sql/<slug>.sql with
+    /// the canonical SQL ($N rewritten to :paramN) and a header carrying
+    /// fingerprint + call count
+    RegresqlStub {
+        /// Input clusters.json (default: stdin)
+        #[arg(long)]
+        r#in: Option<String>,
+        /// Output directory
+        #[arg(long, default_value = "regresql-stubs")]
+        out: String,
+        /// Number of top clusters to emit
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+        /// Skip clusters with total_calls <= this
+        #[arg(long, default_value_t = 0)]
+        min_calls: i64,
+    },
+
     /// Fetch pg_stat_statements (with timing) from a live PG and cluster it
     Capture {
         /// libpq connection string.
@@ -97,6 +119,9 @@ fn main() -> Result<()> {
         }
         Command::Attribute { conn, r#in, top } => {
             attribute::run(r#in.as_deref(), &conn, top)?;
+        }
+        Command::RegresqlStub { r#in, out, top, min_calls } => {
+            regresql_stub::run(r#in.as_deref(), &out, top, min_calls)?;
         }
     }
 
