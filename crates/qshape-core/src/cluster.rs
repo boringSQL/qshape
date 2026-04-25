@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Error, Result};
+
 pub const CURRENT_SCHEMA_VERSION: &str = "1";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -55,8 +57,8 @@ pub struct ParamAttribution {
     pub note: String,
 }
 
-/// Top-level clusters.json document. `schema_version` is required on read;
-/// validate via [`validate_schema_version`] before consuming.
+/// Top-level clusters.json document. Use [`load_clusters_doc`] to parse;
+/// it deserializes and validates `schema_version` in one step.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClustersDoc {
     #[serde(default)]
@@ -65,19 +67,16 @@ pub struct ClustersDoc {
     pub clusters: Vec<Cluster>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum SchemaError {
-    #[error("clusters.json missing schema_version; must be {0:?}")]
-    Missing(&'static str),
-    #[error("clusters.json schema_version={0:?} not supported; must be {1:?}")]
-    Unsupported(String, &'static str),
-}
-
-pub fn validate_schema_version(doc: &ClustersDoc) -> Result<(), SchemaError> {
+/// Parse and validate a clusters.json byte buffer.
+pub fn load_clusters_doc(bytes: &[u8]) -> Result<ClustersDoc> {
+    let doc: ClustersDoc = serde_json::from_slice(bytes)?;
     match doc.schema_version.as_str() {
-        CURRENT_SCHEMA_VERSION => Ok(()),
-        "" => Err(SchemaError::Missing(CURRENT_SCHEMA_VERSION)),
-        other => Err(SchemaError::Unsupported(other.to_string(), CURRENT_SCHEMA_VERSION)),
+        CURRENT_SCHEMA_VERSION => Ok(doc),
+        "" => Err(Error::MissingSchemaVersion(CURRENT_SCHEMA_VERSION)),
+        other => Err(Error::UnsupportedSchemaVersion(
+            other.to_string(),
+            CURRENT_SCHEMA_VERSION,
+        )),
     }
 }
 
