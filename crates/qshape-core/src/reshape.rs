@@ -86,8 +86,45 @@ fn reshape_update(u: &mut UpdateStmt) {
         reshape_with_clause(w);
     }
     reshape_nested_from(&mut u.from_clause);
+    for n in &mut u.target_list {
+        reshape_sublinks(n);
+    }
+    if let Some(w) = u.where_clause.as_deref_mut() {
+        reshape_sublinks(w);
+    }
+    for n in &mut u.returning_list {
+        reshape_sublinks(n);
+    }
 
-    // TODO: alias stripping + sublinks
+    let mut entries: Vec<ScopeEntry> = Vec::new();
+    if let Some(rv) = u.relation.as_ref() {
+        entries.push(range_var_entry(rv));
+    }
+    for n in &u.from_clause {
+        collect_from_item(n, &mut entries);
+    }
+    let dec = decorative_aliases(&entries);
+    if !dec.is_empty() {
+        if let Some(rv) = u.relation.as_mut()
+            && let Some(a) = rv.alias.as_ref()
+            && dec.contains_key(&a.aliasname)
+        {
+            rv.alias = None;
+        }
+        strip_aliases_in_from(&mut u.from_clause, &dec);
+        for n in &mut u.target_list {
+            rewrite_refs(n, &dec);
+        }
+        if let Some(w) = u.where_clause.as_deref_mut() {
+            rewrite_refs(w, &dec);
+        }
+        for n in &mut u.returning_list {
+            rewrite_refs(n, &dec);
+        }
+        for n in &mut u.from_clause {
+            rewrite_refs(n, &dec);
+        }
+    }
 
     if let Some(w) = u.where_clause.as_deref_mut() {
         sort_and_tree(w);
@@ -99,8 +136,39 @@ fn reshape_delete(d: &mut DeleteStmt) {
         reshape_with_clause(w);
     }
     reshape_nested_from(&mut d.using_clause);
+    if let Some(w) = d.where_clause.as_deref_mut() {
+        reshape_sublinks(w);
+    }
+    for n in &mut d.returning_list {
+        reshape_sublinks(n);
+    }
 
-    // TODO: alias stripping + sublinks
+    let mut entries: Vec<ScopeEntry> = Vec::new();
+    if let Some(rv) = d.relation.as_ref() {
+        entries.push(range_var_entry(rv));
+    }
+    for n in &d.using_clause {
+        collect_from_item(n, &mut entries);
+    }
+    let dec = decorative_aliases(&entries);
+    if !dec.is_empty() {
+        if let Some(rv) = d.relation.as_mut()
+            && let Some(a) = rv.alias.as_ref()
+            && dec.contains_key(&a.aliasname)
+        {
+            rv.alias = None;
+        }
+        strip_aliases_in_from(&mut d.using_clause, &dec);
+        if let Some(w) = d.where_clause.as_deref_mut() {
+            rewrite_refs(w, &dec);
+        }
+        for n in &mut d.returning_list {
+            rewrite_refs(n, &dec);
+        }
+        for n in &mut d.using_clause {
+            rewrite_refs(n, &dec);
+        }
+    }
 
     if let Some(w) = d.where_clause.as_deref_mut() {
         sort_and_tree(w);
@@ -223,12 +291,28 @@ fn collect_from_item(n: &Node, out: &mut Vec<ScopeEntry>) {
             }
         }
         Some(NodeEnum::RangeSubselect(rs)) => {
-            let alias = rs.alias.as_ref().map(|a| a.aliasname.clone()).unwrap_or_default();
-            out.push(ScopeEntry { relname: String::new(), alias_name: alias, required: true });
+            let alias = rs
+                .alias
+                .as_ref()
+                .map(|a| a.aliasname.clone())
+                .unwrap_or_default();
+            out.push(ScopeEntry {
+                relname: String::new(),
+                alias_name: alias,
+                required: true,
+            });
         }
         Some(NodeEnum::RangeFunction(rf)) => {
-            let alias = rf.alias.as_ref().map(|a| a.aliasname.clone()).unwrap_or_default();
-            out.push(ScopeEntry { relname: String::new(), alias_name: alias, required: true });
+            let alias = rf
+                .alias
+                .as_ref()
+                .map(|a| a.aliasname.clone())
+                .unwrap_or_default();
+            out.push(ScopeEntry {
+                relname: String::new(),
+                alias_name: alias,
+                required: true,
+            });
         }
         _ => {}
     }
@@ -239,7 +323,11 @@ fn range_var_entry(rv: &RangeVar) -> ScopeEntry {
         Some(a) if a.colnames.is_empty() => a.aliasname.clone(),
         _ => String::new(),
     };
-    ScopeEntry { relname: rv.relname.clone(), alias_name, required: false }
+    ScopeEntry {
+        relname: rv.relname.clone(),
+        alias_name,
+        required: false,
+    }
 }
 
 fn decorative_aliases(entries: &[ScopeEntry]) -> Dec {
@@ -271,7 +359,9 @@ fn decorative_aliases(entries: &[ScopeEntry]) -> Dec {
 
 fn string_node(s: &str) -> Node {
     Node {
-        node: Some(NodeEnum::String(pg_query::protobuf::String { sval: s.to_string() })),
+        node: Some(NodeEnum::String(pg_query::protobuf::String {
+            sval: s.to_string(),
+        })),
     }
 }
 
@@ -389,7 +479,10 @@ fn fix_extract_field_ident(fc: &mut FuncCall) {
     }
 
     let ident = match fc.args[0].node.as_ref() {
-        Some(NodeEnum::AConst(AConst { val: Some(a_const::Val::Sval(s)), .. })) => s.sval.clone(),
+        Some(NodeEnum::AConst(AConst {
+            val: Some(a_const::Val::Sval(s)),
+            ..
+        })) => s.sval.clone(),
         Some(NodeEnum::ParamRef(_)) => "epoch".to_string(),
         _ => return,
     };
@@ -639,8 +732,7 @@ mod tests {
     // reshape_select.
     #[test]
     fn params_stay_query_wide_across_subselect() {
-        let sql =
-            "SELECT id FROM users WHERE id = $1 AND tenant_id IN (SELECT t FROM tenants WHERE t = $2)";
+        let sql = "SELECT id FROM users WHERE id = $1 AND tenant_id IN (SELECT t FROM tenants WHERE t = $2)";
         let out = normalize(sql).unwrap();
         assert!(out.contains("$1") && out.contains("$2"), "got: {out}");
     }
@@ -656,23 +748,23 @@ mod tests {
     // string. Otherwise downstream literal-parameterisers break the SQL.
     #[test]
     fn extract_field_stays_identifier() {
-        let out =
-            normalize("SELECT auth.f(extract(epoch FROM '1 hour'::interval)::bigint, 100)")
-                .unwrap();
+        let out = normalize("SELECT auth.f(extract(epoch FROM '1 hour'::interval)::bigint, 100)")
+            .unwrap();
         assert!(out.contains("extract (epoch FROM"), "got: {out}");
-        assert!(!out.contains("'epoch'"), "field leaked as string literal: {out}");
+        assert!(
+            !out.contains("'epoch'"),
+            "field leaked as string literal: {out}"
+        );
     }
 
     // If the field arrived already parameterised, substitute a stable
     // ident and let renumber_params close the resulting gap.
     #[test]
     fn extract_param_field_recovered() {
-        let out = normalize(
-            "SELECT auth.clean_up_sessions(extract($1 FROM $2::interval)::bigint, $3)",
-        )
-        .unwrap();
-        let want =
-            "SELECT auth.clean_up_sessions(extract (epoch FROM $1::interval)::bigint, $2)";
+        let out =
+            normalize("SELECT auth.clean_up_sessions(extract($1 FROM $2::interval)::bigint, $3)")
+                .unwrap();
+        let want = "SELECT auth.clean_up_sessions(extract (epoch FROM $1::interval)::bigint, $2)";
         assert_eq!(out, want);
     }
 
@@ -735,7 +827,10 @@ mod tests {
         // Both aliases must stay — otherwise the join is ambiguous.
         let got =
             normalize("SELECT a.id FROM users a INNER JOIN users b ON a.id = b.parent_id").unwrap();
-        assert_eq!(got, "SELECT a.id FROM users a JOIN users b ON a.id = b.parent_id");
+        assert_eq!(
+            got,
+            "SELECT a.id FROM users a JOIN users b ON a.id = b.parent_id"
+        );
     }
 
     #[test]
@@ -786,7 +881,10 @@ mod tests {
     #[test]
     fn comma_join_canonicalises_aliases() {
         let got = normalize("SELECT a.id FROM users a, orders b WHERE a.id = b.user_id").unwrap();
-        assert_eq!(got, "SELECT users.id FROM users, orders WHERE users.id = orders.user_id");
+        assert_eq!(
+            got,
+            "SELECT users.id FROM users, orders WHERE users.id = orders.user_id"
+        );
     }
 
     #[test]
