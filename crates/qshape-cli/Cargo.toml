@@ -12,4 +12,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+postgres = "0.19"
 qshape-core = { path = "../qshape-core" }
+serde_json.workspace = true

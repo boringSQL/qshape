@@ -3,6 +3,8 @@ use std::io::{self, Read};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+mod capture;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "qshape",
@@ -30,6 +32,21 @@ enum Command {
         /// SQL to normalize; `-` or absent reads stdin.
         sql: Option<String>,
     },
+
+    /// Fetch pg_stat_statements (with timing) from a live PG and cluster it
+    Capture {
+        /// libpq connection string.
+        conn: String,
+        /// Exclude queries with calls <= this value.
+        #[arg(long, default_value_t = 0)]
+        min_calls: i64,
+        /// Limit to top N by total_exec_time (0 = no limit).
+        #[arg(long, default_value_t = 0)]
+        limit: i32,
+        /// Filter to a specific database name (default: all).
+        #[arg(long)]
+        database: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -54,6 +71,9 @@ fn main() -> Result<()> {
             };
             let out = qshape_core::normalize(input.trim())?;
             println!("{out}");
+        }
+        Command::Capture { conn, min_calls, limit, database } => {
+            capture::run(&conn, min_calls, limit, database.as_deref())?;
         }
     }
 
