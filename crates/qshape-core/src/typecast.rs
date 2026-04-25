@@ -228,6 +228,167 @@ fn func_schema_name(funcname: &[Node]) -> Option<(String, String)> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn lookup_from<'a>(
+        map: &'a HashMap<(&'a str, &'a str, usize), Vec<&'a str>>,
+    ) -> impl FnMut(&str, &str, usize) -> Option<Vec<String>> + 'a {
+        |schema: &str, name: &str, n: usize| {
+            map.get(&(schema, name, n))
+                .map(|v| v.iter().map(|s| (*s).to_string()).collect())
+        }
+    }
+
+    fn empty_lookup(_: &str, _: &str, _: usize) -> Option<Vec<String>> {
+        None
+    }
+
+    #[test]
+    fn wraps_unqualified_params() {
+        let map = HashMap::from([(("toggl", "is_login_restricted_by_sso", 1), vec!["text"])]);
+        let got = cast_func_param_refs(
+            "SELECT toggl.is_login_restricted_by_sso($1)",
+            &mut lookup_from(&map),
+        );
+        assert_eq!(got, "SELECT toggl.is_login_restricted_by_sso($1::text)");
+    }
+
+    #[test]
+    fn multiple_args_mixed() {
+        let map = HashMap::from([(("auth", "clean_up_sessions", 2), vec!["int8", "int4"])]);
+        let got = cast_func_param_refs(
+            "SELECT auth.clean_up_sessions($1, 100)",
+            &mut lookup_from(&map),
+        );
+        assert_eq!(got, "SELECT auth.clean_up_sessions($1::int8, 100)");
+    }
+
+    #[test]
+    fn qualified_type() {
+        let map = HashMap::from([(("public", "do_thing", 1), vec!["public.my_type"])]);
+        let got = cast_func_param_refs("SELECT public.do_thing($1)", &mut lookup_from(&map));
+        assert_eq!(got, "SELECT public.do_thing($1::public.my_type)");
+    }
+
+    #[test]
+    fn skips_unresolved() {
+        let got = cast_func_param_refs("SELECT unknown.f($1)", &mut empty_lookup);
+        assert_eq!(got, "SELECT unknown.f($1)");
+    }
+
+    // pg_catalog.extract is a COERCE_SQL_SYNTAX form — its first arg is
+    // a field identifier, not an overload-resolvable param
+    #[test]
+    fn skips_extract() {
+        let sql = "SELECT extract (epoch FROM $1::interval)";
+        let got = cast_func_param_refs(sql, &mut empty_lookup);
+        assert_eq!(got, sql);
+    }
+
+    // No FuncCall with ParamRef arg — $1 in WHERE is resolved by the
+    // planner from the column type
+    #[test]
+    fn leaves_column_context_params() {
+        let sql = "SELECT id FROM users WHERE id = $1";
+        let got = cast_func_param_refs(sql, &mut empty_lookup);
+        assert_eq!(got, sql);
+    }
+
+    // BoolExpr (AND/OR/NOT) args must be boolean — bare ParamRef there
+    // defaults to unknown/text and breaks planning
+    #[test]
+    fn bool_expr_param_to_bool() {
+        let got = cast_func_param_refs(
+            "SELECT * FROM users WHERE $1 OR active",
+            &mut empty_lookup,
+        );
+        assert_eq!(got, "SELECT * FROM users WHERE $1::bool OR active");
+    }
+
+    // VARIADIC ANY: pronargs=0 in pg_proc so cast_func_call can't resolve;
+    // odd-position keys must be text
+    #[test]
+    fn json_build_object_keys_to_text() {
+        let got = cast_func_param_refs(
+            "SELECT json_build_object($1, user_id, $2, name)",
+            &mut empty_lookup,
+        );
+        assert_eq!(got, "SELECT json_build_object($1::text, user_id, $2::text, name)");
+    }
+
+    // EXISTS (SELECT $N ...): PG ignores the value but still types $N
+    #[test]
+    fn exists_select_list_param_to_int() {
+        let got = cast_func_param_refs(
+            "SELECT EXISTS (SELECT $1 FROM users WHERE id = $2)",
+            &mut empty_lookup,
+        );
+        assert_eq!(got, "SELECT EXISTS (SELECT $1::int4 FROM users WHERE id = $2)");
+    }
+
+    // JOIN ... ON <expr>: qualifier must be boolean
+    #[test]
+    fn join_on_param_to_bool() {
+        let got = cast_func_param_refs(
+            "SELECT * FROM a LEFT JOIN b ON $1",
+            &mut empty_lookup,
+        );
+        assert_eq!(got, "SELECT * FROM a LEFT JOIN b ON $1::bool");
+    }
+
+    // Searched CASE: each WHEN is a boolean predicate
+    #[test]
+    fn searched_case_when_param_to_bool() {
+        let got = cast_func_param_refs(
+            "SELECT CASE WHEN $1 THEN 'a' ELSE 'b' END",
+            &mut empty_lookup,
+        );
+        assert_eq!(got, "SELECT CASE WHEN $1::bool THEN 'a' ELSE 'b' END");
+    }
+
+    // Simple CASE: arg WHEN val — value compared to arg, must stay typed
+    // to arg's type
+    #[test]
+    fn simple_case_when_param_uncast() {
+        let sql = "SELECT CASE col WHEN $1 THEN 'a' ELSE 'b' END FROM t";
+        let got = cast_func_param_refs(sql, &mut empty_lookup);
+        assert_eq!(got, sql);
+    }
+
+    // CoalesceExpr is a SQL construct, not a FuncCall — walker needs an
+    // explicit case for it. json_build_object buried inside COALESCE was
+    // missed before walking CoalesceExpr children
+    #[test]
+    fn descends_into_coalesce_expr() {
+        let got = cast_func_param_refs(
+            "SELECT COALESCE(json_agg(json_build_object($1, col)), $2::pg_catalog.json) FROM t",
+            &mut empty_lookup,
+        );
+        assert_eq!(
+            got,
+            "SELECT COALESCE(json_agg(json_build_object($1::text, col)), $2::pg_catalog.json) FROM t"
+        );
+    }
+
+    #[test]
+    fn max_param_number_cases() {
+        for (sql, want) in [
+            ("SELECT 1", 0),
+            ("SELECT $1", 1),
+            ("SELECT $1, $2, $3", 3),
+            ("SELECT $10 + $2", 10),
+            ("SELECT '$1 inside string'", 0),
+            ("SELECT 'it''s $5' || $3", 3),
+        ] {
+            assert_eq!(max_param_number(sql), want, "input: {sql:?}");
+        }
+    }
+}
+
 fn type_name_from_string(s: &str) -> TypeName {
     let names = s
         .split('.')
