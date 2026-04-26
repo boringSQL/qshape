@@ -860,7 +860,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qshape-cli"
+name = "qshape"
 version = "0.2.0"
 dependencies = [
  "anyhow",

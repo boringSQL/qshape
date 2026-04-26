@@ -37,8 +37,7 @@ From source:
 cargo install --path crates/qshape-cli
 ```
 
-Pre-built binaries for macOS and Linux (amd64 + arm64) are published on
-each release via [GoReleaser](https://github.com/boringsql/qshape/releases).
+Pre-built binaries will return once the Rust release pipeline lands.
 
 ## CLI
 

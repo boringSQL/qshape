@@ -1,9 +1,11 @@
 [package]
-name = "qshape-cli"
+name = "qshape"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "AST-level canonicalization and fingerprinting of PostgreSQL queries, with pg_stat_statements capture."
+homepage = "https://github.com/boringsql/qshape"
 
 [[bin]]
 name = "qshape"
