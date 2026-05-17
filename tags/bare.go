@@ -36,6 +36,8 @@ func bareCommentBody(s string) string {
 	return ""
 }
 
+func SanitizeName(s string) string { return sanitizeBareName(s) }
+
 func sanitizeBareName(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = reBareSanitize.ReplaceAllString(s, "-")

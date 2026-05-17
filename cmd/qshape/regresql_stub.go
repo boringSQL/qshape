@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/boringsql/qshape"
+	"github.com/boringsql/qshape/tags"
 	"github.com/spf13/cobra"
 )
 
@@ -159,7 +160,7 @@ func runRegresqlStub(inPath, outDir string, top int, minCalls int64, fixturePath
 		}
 
 		emitted++
-		slug := stubSlug(emitted, c.Fingerprint)
+		slug := stubSlugFor(emitted, c)
 		sql, _ := rewriteParams(c.Canonical)
 
 		sqlPath := filepath.Join(sqlDir, slug+".sql")
@@ -183,6 +184,13 @@ func stubSlug(rank int, fp string) string {
 		prefix = prefix[:8]
 	}
 	return fmt.Sprintf("q%02d-%s", rank, prefix)
+}
+
+func stubSlugFor(rank int, c qshape.Cluster) string {
+	if name := tags.SanitizeName(c.RegresqlMeta["name"]); name != "" {
+		return name
+	}
+	return stubSlug(rank, c.Fingerprint)
 }
 
 // rewriteParams replaces $N with :paramN and returns the sorted unique
@@ -210,6 +218,22 @@ func rewriteParams(sql string) (string, []string) {
 func writeSQLStub(path, slug string, c qshape.Cluster, sql string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "-- name: %s\n", slug)
+	if d := c.RegresqlMeta["description"]; d != "" {
+		fmt.Fprintf(&b, "-- description: %s\n", d)
+	}
+	for _, k := range []string{"max-cost", "required-nodes", "timeout"} {
+		if v := c.RegresqlMeta[k]; v != "" {
+			fmt.Fprintf(&b, "-- %s: %s\n", k, v)
+		}
+	}
+	ownerKeys := make([]string, 0, len(c.Owners))
+	for k := range c.Owners {
+		ownerKeys = append(ownerKeys, k)
+	}
+	sort.Strings(ownerKeys)
+	for _, k := range ownerKeys {
+		fmt.Fprintf(&b, "-- tag-%s: %s\n", k, c.Owners[k])
+	}
 	fmt.Fprintf(&b, "-- Generated from qshape cluster %s\n", c.Fingerprint)
 	fmt.Fprintf(&b, "-- Total calls (prod): %d across %d member variants\n", c.TotalCalls, len(c.Members))
 	fmt.Fprintf(&b, "-- TODO: rename this slug, review canonical SQL, replace :paramN with meaningful names\n")

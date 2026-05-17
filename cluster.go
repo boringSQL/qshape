@@ -1,6 +1,10 @@
 package qshape
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/boringsql/qshape/tags"
+)
 
 type (
 	Query struct {
@@ -22,6 +26,14 @@ type (
 		MeanExecTimeMs  float64            `json:"mean_exec_time_ms,omitempty"`
 		Rows            int64              `json:"rows,omitempty"`
 		Params          []ParamAttribution `json:"params,omitempty"`
+		Owners          map[string]string       `json:"owners,omitempty"`
+		RegresqlMeta    map[string]string       `json:"regresql_meta,omitempty"`
+		DynamicTagKeys  []DynamicKeyObservation `json:"dynamic_tag_keys,omitempty"`
+	}
+
+	DynamicKeyObservation struct {
+		Key                  string `json:"key"`
+		ValueCardinalitySeen int    `json:"value_cardinality_seen"`
 	}
 
 	ParamAttribution struct {
@@ -74,11 +86,13 @@ func Group(queries []Query) ([]Cluster, error) {
 		c.Rows += q.Rows
 	}
 
+	policy := tags.DefaultPolicy()
 	out := make([]Cluster, 0, len(groups)+len(unparseable))
 	for _, c := range groups {
 		if c.TotalCalls > 0 {
 			c.MeanExecTimeMs = c.TotalExecTimeMs / float64(c.TotalCalls)
 		}
+		applyTags(c, policy)
 		out = append(out, *c)
 	}
 	out = append(out, unparseable...)
@@ -101,4 +115,26 @@ func Group(queries []Query) ([]Cluster, error) {
 		return out[i].Fingerprint < out[j].Fingerprint
 	})
 	return out, nil
+}
+
+func applyTags(c *Cluster, policy *tags.Policy) {
+	if len(c.Members) == 0 {
+		return
+	}
+	extracted := tags.Extract(c.Members[0].Raw)
+	if len(extracted) == 0 {
+		return
+	}
+	classified := tags.Classify(extracted, policy)
+	c.Owners = classified.Owners
+	c.RegresqlMeta = classified.RegresqlMeta
+	if len(classified.DynamicKeys) > 0 {
+		c.DynamicTagKeys = make([]DynamicKeyObservation, len(classified.DynamicKeys))
+		for i, d := range classified.DynamicKeys {
+			c.DynamicTagKeys[i] = DynamicKeyObservation{Key: d.Key, ValueCardinalitySeen: d.ValueCardinalitySeen}
+		}
+		sort.Slice(c.DynamicTagKeys, func(i, j int) bool {
+			return c.DynamicTagKeys[i].Key < c.DynamicTagKeys[j].Key
+		})
+	}
 }
