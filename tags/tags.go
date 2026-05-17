@@ -55,16 +55,3 @@ func Extract(rawSQL string) []Tag {
 	return nil
 }
 
-func Classify(tags []Tag, p *Policy) ClassifiedTags {
-	return ClassifiedTags{}
-}
-
-func DefaultPolicy() *Policy {
-	return &Policy{
-		Stable:                      map[string]struct{}{},
-		Deny:                        map[string]struct{}{},
-		VendorMap:                   map[string]string{},
-		Reserved:                    map[string]struct{}{},
-		CardinalityPromoteThreshold: 100,
-	}
-}
