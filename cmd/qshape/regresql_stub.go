@@ -190,7 +190,23 @@ func stubSlugFor(rank int, c qshape.Cluster) string {
 	if name := tags.SanitizeName(c.RegresqlMeta["name"]); name != "" {
 		return name
 	}
+	if name := tags.SanitizeName(syntheticName(c.Owners)); name != "" {
+		return name
+	}
 	return stubSlug(rank, c.Fingerprint)
+}
+
+func syntheticName(owners map[string]string) string {
+	parts := make([]string, 0, 3)
+	for _, k := range []string{"application", "controller", "action"} {
+		if v := owners[k]; v != "" {
+			parts = append(parts, v)
+		}
+	}
+	if v := owners["job"]; v != "" && len(parts) == 0 {
+		parts = append(parts, v)
+	}
+	return strings.Join(parts, "-")
 }
 
 // rewriteParams replaces $N with :paramN and returns the sorted unique
