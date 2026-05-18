@@ -38,19 +38,17 @@ const (
 )
 
 func Extract(rawSQL string) []Tag {
-	f, ok := DetectFormat(rawSQL)
-	if !ok {
-		return nil
+	if t := parseHeader(rawSQL); len(t) > 0 {
+		return t
 	}
-	switch f {
-	case FormatHeader:
-		return parseHeader(rawSQL)
-	case FormatSqlcommenter:
-		return parseSqlcommenter(rawSQL)
-	case FormatMarginalia:
-		return parseMarginalia(rawSQL)
-	case FormatBareComment:
-		return parseBareComment(rawSQL)
+	if t := parseSqlcommenter(rawSQL); len(t) > 0 {
+		return t
+	}
+	if t := parseMarginalia(rawSQL); len(t) > 0 {
+		return t
+	}
+	if t := parseBareComment(rawSQL); len(t) > 0 {
+		return t
 	}
 	return nil
 }

@@ -1,6 +1,14 @@
 package qshape
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
+
+var (
+	jsonMarshal   = json.Marshal
+	jsonUnmarshal = json.Unmarshal
+)
 
 func TestGroupAggregatesCalls(t *testing.T) {
 	in := []Query{
@@ -154,5 +162,95 @@ func TestGroupEmpty(t *testing.T) {
 	}
 	if len(out) != 0 {
 		t.Errorf("expected empty slice, got %d clusters", len(out))
+	}
+}
+
+// TestGroupPopulatesTagsFromFirstMember verifies the integration glue
+// in Group(): the first member's raw SQL is the one fed through
+// tags.Extract+Classify, and the result lands on the three new cluster
+// fields. This is the "Tier 1 lottery-winner" attribution path
+// — pg_stat_statements has already chosen a single SQL per bucket, so
+// member[0] is the only sample we'll ever see.
+func TestGroupPopulatesTagsFromFirstMember(t *testing.T) {
+	in := []Query{
+		{Raw: "/*application:billing,controller:orders*/ SELECT id FROM users WHERE id = 1", Calls: 50},
+		{Raw: "/*application:billing,controller:orders*/ SELECT id FROM users WHERE id = 999", Calls: 50},
+	}
+	out, err := Group(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(out))
+	}
+	if out[0].Owners["application"] != "billing" {
+		t.Errorf("Owners[application] = %q, want billing", out[0].Owners["application"])
+	}
+	if out[0].Owners["controller"] != "orders" {
+		t.Errorf("Owners[controller] = %q, want orders", out[0].Owners["controller"])
+	}
+}
+
+// TestGroupTagsOmittedForUntagged: when SQL has no tags, the three
+// new fields must remain nil so the JSON encoder omits them via
+// `omitempty`. Otherwise every untagged cluster bloats clusters.json
+// with empty objects — annoying for diffs and pointless on the wire.
+func TestGroupTagsOmittedForUntagged(t *testing.T) {
+	in := []Query{{Raw: "SELECT 1 FROM users", Calls: 1}}
+	out, _ := Group(in)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 cluster")
+	}
+	if out[0].Owners != nil || out[0].RegresqlMeta != nil || out[0].DynamicTagKeys != nil {
+		t.Errorf("untagged cluster should have nil tag fields, got %+v", out[0])
+	}
+}
+
+// TestGroupDynamicTagKeysSorted locks in determinism for
+// DynamicTagKeys — emitted JSON must be byte-stable across runs
+// regardless of map iteration order. Without sorting, two captures
+// of the same DB could diff on a clusters.json that ought to be
+// identical.
+func TestGroupDynamicTagKeysSorted(t *testing.T) {
+	// sqlcommenter with multiple dynamic keys forces the sort path
+	in := []Query{{
+		Raw:   "SELECT 1 /*traceparent='abc',span_id='def',request_id='xyz'*/",
+		Calls: 1,
+	}}
+	out, _ := Group(in)
+	keys := out[0].DynamicTagKeys
+	for i := 1; i < len(keys); i++ {
+		if keys[i-1].Key > keys[i].Key {
+			t.Errorf("DynamicTagKeys not sorted: %+v", keys)
+		}
+	}
+}
+
+// TestClusterRoundTripJSON is the cross-language contract guard.
+// dryrun-rs's qshape_bridge consumes clusters.json from Rust; the
+// only way that's safe long-term is if the wire format is byte-stable.
+// Marshal → unmarshal → marshal must return the same bytes. If a
+// field gets reordered or a new non-omitempty field sneaks in, this
+// test catches it before it breaks a downstream consumer.
+func TestClusterRoundTripJSON(t *testing.T) {
+	in := []Query{{
+		Raw:   "/*application:billing*/ SELECT 1 FROM users WHERE id = 1",
+		Calls: 10,
+	}}
+	clusters, _ := Group(in)
+	first, err := jsonMarshal(clusters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTripped []Cluster
+	if err := jsonUnmarshal(first, &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	second, err := jsonMarshal(roundTripped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("round-trip mismatch:\nfirst:  %s\nsecond: %s", first, second)
 	}
 }

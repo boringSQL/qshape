@@ -21,15 +21,13 @@ func parseBareComment(rawSQL string) []Tag {
 
 func bareCommentBody(s string) string {
 	for _, block := range edgeBlockComments(s) {
-		body := strings.TrimSpace(block)
-		if body != "" && !strings.ContainsAny(body, ":=,") {
+		if body := strings.TrimSpace(block); body != "" {
 			return body
 		}
 	}
 	t := strings.TrimLeft(s, " \t\r\n")
 	if strings.HasPrefix(t, "--") {
-		line := strings.TrimSpace(strings.TrimPrefix(strings.SplitN(t, "\n", 2)[0], "--"))
-		if line != "" && !strings.ContainsAny(line, ":=,") {
+		if line := strings.TrimSpace(strings.TrimPrefix(strings.SplitN(t, "\n", 2)[0], "--")); line != "" {
 			return line
 		}
 	}
