@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/boringsql/qshape"
@@ -117,7 +119,38 @@ FROM pg_stat_statements s`)
 
 	fmt.Fprintf(os.Stderr, "captured %d queries → %d clusters\n", len(queries), len(clusters))
 
+	appNames := fetchApplicationNames(ctx, conn)
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	return enc.Encode(clustersDoc{SchemaVersion: currentSchemaVersion, Clusters: clusters})
+	return enc.Encode(clustersDoc{
+		SchemaVersion:            currentSchemaVersion,
+		ObservedApplicationNames: appNames,
+		Clusters:                 clusters,
+	})
+}
+
+func fetchApplicationNames(ctx context.Context, conn *pgx.Conn) []string {
+	rows, err := conn.Query(ctx, `SELECT DISTINCT application_name FROM pg_stat_activity
+WHERE application_name <> '' AND pid <> pg_backend_pid()`)
+	if err != nil {
+		slog.Warn("could not read pg_stat_activity application_name", "err", err)
+		return nil
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			slog.Warn("scan application_name", "err", err)
+			return nil
+		}
+		names = append(names, n)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("iterate application_name", "err", err)
+		return nil
+	}
+	sort.Strings(names)
+	return names
 }

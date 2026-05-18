@@ -9,8 +9,9 @@ import (
 const currentSchemaVersion = "1"
 
 type clustersDoc struct {
-	SchemaVersion string           `json:"schema_version"`
-	Clusters      []qshape.Cluster `json:"clusters"`
+	SchemaVersion            string           `json:"schema_version"`
+	ObservedApplicationNames []string         `json:"observed_application_names,omitempty"`
+	Clusters                 []qshape.Cluster `json:"clusters"`
 }
 
 func validateSchemaVersion(doc *clustersDoc) error {
