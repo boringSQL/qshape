@@ -146,3 +146,62 @@ func mustContain(t *testing.T, s, sub string) {
 		t.Errorf("output missing %q. full:\n%s", sub, s)
 	}
 }
+
+// TestStubSlugFor_SynthesizesFromOwners: marginalia / sqlcommenter
+// workloads (Rails, Datadog) don't typically carry a `name` tag —
+// they carry application / controller / action. Rather than fall
+// back to q##-<fp8> for the dominant case, the slug is synthesized
+// by joining those three (sanitized) so a stub becomes e.g.
+// `billing-orderscontroller-show.sql`. Job-only tags also work
+// (background workers) when no HTTP triple is present.
+func TestStubSlugFor_SynthesizesFromOwners(t *testing.T) {
+	cases := []struct {
+		name   string
+		owners map[string]string
+		want   string
+	}{
+		{
+			"controller+action",
+			map[string]string{"controller": "OrdersController", "action": "show"},
+			"orderscontroller-show",
+		},
+		{
+			"application+controller+action",
+			map[string]string{"application": "billing", "controller": "Orders", "action": "show"},
+			"billing-orders-show",
+		},
+		{
+			"job-only",
+			map[string]string{"job": "EmailDigestJob"},
+			"emaildigestjob",
+		},
+		{
+			"job-ignored-when-http-present",
+			map[string]string{"controller": "X", "job": "ignored"},
+			"x",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cl := qshape.Cluster{Fingerprint: "sha1:abc12345", Owners: c.owners}
+			if got := stubSlugFor(1, cl); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestStubSlugFor_NameWinsOverSynthetic: explicit RegresqlMeta["name"]
+// is always preferred over a synthetic owner-derived slug. This is
+// the ordering documented in stubSlugFor — explicit > synthetic >
+// fallback.
+func TestStubSlugFor_NameWinsOverSynthetic(t *testing.T) {
+	c := qshape.Cluster{
+		Fingerprint:  "sha1:abc12345",
+		RegresqlMeta: map[string]string{"name": "MyExplicitName"},
+		Owners:       map[string]string{"controller": "Other"},
+	}
+	if got := stubSlugFor(1, c); got != "myexplicitname" {
+		t.Errorf("got %q, want myexplicitname", got)
+	}
+}
