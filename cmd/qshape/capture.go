@@ -14,9 +14,10 @@ import (
 
 func captureCmd() *cobra.Command {
 	var (
-		minCalls int64
-		limit    int
-		database string
+		minCalls   int64
+		limit      int
+		database   string
+		policyPath string
 	)
 	cmd := &cobra.Command{
 		Use:   "capture <conn-string>",
@@ -33,16 +34,17 @@ Connection string accepts libpq URLs (postgres://user:pass@host/db)
 or keyword/value form (host=... user=... dbname=...).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runCapture(args[0], minCalls, limit, database)
+			return runCapture(args[0], minCalls, limit, database, policyPath)
 		},
 	}
 	cmd.Flags().Int64Var(&minCalls, "min-calls", 0, "exclude queries with calls <= this value")
 	cmd.Flags().IntVar(&limit, "limit", 0, "limit to top N by total_exec_time (0 = no limit)")
 	cmd.Flags().StringVar(&database, "database", "", "filter to a specific database name (default: all)")
+	cmd.Flags().StringVar(&policyPath, "policy-file", "", "JSON policy override for tag classification")
 	return cmd
 }
 
-func runCapture(connStr string, minCalls int64, limit int, database string) error {
+func runCapture(connStr string, minCalls int64, limit int, database, policyPath string) error {
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, connStr)
 	if err != nil {
@@ -104,7 +106,11 @@ FROM pg_stat_statements s`)
 		return err
 	}
 
-	clusters, err := qshape.Group(queries)
+	policy, err := loadPolicy(policyPath)
+	if err != nil {
+		return err
+	}
+	clusters, err := qshape.GroupWithPolicy(queries, policy)
 	if err != nil {
 		return err
 	}

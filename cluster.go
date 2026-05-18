@@ -51,6 +51,10 @@ type (
 // sorted by descending TotalExecTimeMs (when any timing is present),
 // otherwise by descending TotalCalls, with Fingerprint as the tiebreaker.
 func Group(queries []Query) ([]Cluster, error) {
+	return GroupWithPolicy(queries, tags.DefaultPolicy())
+}
+
+func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 	groups := make(map[string]*Cluster)
 	var unparseable []Cluster
 
@@ -86,7 +90,9 @@ func Group(queries []Query) ([]Cluster, error) {
 		c.Rows += q.Rows
 	}
 
-	policy := tags.DefaultPolicy()
+	if policy == nil {
+		policy = tags.DefaultPolicy()
+	}
 	out := make([]Cluster, 0, len(groups)+len(unparseable))
 	for _, c := range groups {
 		if c.TotalCalls > 0 {

@@ -18,6 +18,7 @@ func Run() error {
 		captureCmd(),
 		attributeCmd(),
 		regresqlStubCmd(),
+		tagsCmd(),
 		versionCmd(),
 	)
 	return root.Execute()
