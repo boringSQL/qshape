@@ -10,6 +10,8 @@ ActiveRecord, SQLAlchemy, Prisma, Sequelize) produce many queryids for
 one logical query shape. `qshape` collapses those variants to a single
 canonical fingerprint and aggregates their timing.
 
+`qShape` is part of the [boringSQL](https://boringsql.com) stack alongside [RegreSQL](https://github.com/boringSQL/regresql), [Fixturize](https://github.com/boringSQL/fixturize) and [dryrun](https://github.com/boringSQL/dryrun).
+
 ## Measured corpus reduction
 
 Typical reduction on an ORM-heavy `pg_stat_statements` snapshot is
@@ -59,6 +61,16 @@ qshape attribute --in clusters.json --conn "$DATABASE_URL" > queries-attributed.
 writes `{"clusters":[...]}` to stdout sorted by descending
 `total_exec_time_ms`. Passing `-` (or omitting the SQL arg) to
 `normalize` / `fingerprint` reads stdin.
+
+`qshape` also harvests structured comments (sqlcommenter, marginalia,
+sqlc / boringSQL headers, bare comments) into per-cluster `owners` and
+`regresql_meta` fields.
+
+## Learn more
+
+- **[boringSQL](https://boringsql.com)**, the blog and project home
+- **[RegreSQL](https://github.com/boringSQL/regresql)**, regression testing for PostgreSQL queries
+- **[Fixturize](https://github.com/boringSQL/fixturize)** and **[dryrun](https://github.com/boringSQL/dryrun)**, companion tools in the suite
 
 ## License
 
