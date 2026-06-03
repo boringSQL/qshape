@@ -927,6 +927,30 @@ func sortBoolTree(n *pg_query.Node) {
 	case *pg_query.Node_AExpr:
 		sortBoolTree(v.AExpr.Lexpr)
 		sortBoolTree(v.AExpr.Rexpr)
+		orderCommutativeOperands(v.AExpr)
+	}
+}
+
+// commutativeOps: operands swappable without changing the plan
+var commutativeOps = map[string]bool{
+	"=":  true,
+	"<>": true,
+}
+
+// orderCommutativeOperands sorts operands so `a = b` ≡ `b = a`
+func orderCommutativeOperands(e *pg_query.A_Expr) {
+	if e == nil || e.Kind != pg_query.A_Expr_Kind_AEXPR_OP {
+		return
+	}
+	if e.Lexpr == nil || e.Rexpr == nil || len(e.Name) != 1 {
+		return
+	}
+	op, ok := e.Name[0].Node.(*pg_query.Node_String_)
+	if !ok || !commutativeOps[op.String_.Sval] {
+		return
+	}
+	if argSortKey(e.Lexpr) > argSortKey(e.Rexpr) {
+		e.Lexpr, e.Rexpr = e.Rexpr, e.Lexpr
 	}
 }
 

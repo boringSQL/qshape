@@ -208,7 +208,7 @@ func TestReshapeUpdateWithFromCanonicalisesAliases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "UPDATE users SET name = $1 FROM orders WHERE orders.user_id = users.id"
+	want := "UPDATE users SET name = $1 FROM orders WHERE users.id = orders.user_id"
 	if got != want {
 		t.Errorf("got:  %q\nwant: %q", got, want)
 	}
