@@ -389,6 +389,18 @@ func reshapeNode(n *pg_query.Node) {
 		reshapeUpdate(v.UpdateStmt)
 	case *pg_query.Node_DeleteStmt:
 		reshapeDelete(v.DeleteStmt)
+	case *pg_query.Node_InsertStmt:
+		reshapeInsert(v.InsertStmt)
+	}
+}
+
+// reshapeInsert canonicalizes an INSERT ... SELECT body; VALUES is a no-op
+func reshapeInsert(i *pg_query.InsertStmt) {
+	if i == nil || i.SelectStmt == nil {
+		return
+	}
+	if s, ok := i.SelectStmt.Node.(*pg_query.Node_SelectStmt); ok {
+		reshapeSelect(s.SelectStmt)
 	}
 }
 
