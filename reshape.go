@@ -8,7 +8,7 @@ import (
 )
 
 // reshape rewrites a parsed tree so that decorative table aliases are
-// stripped and sort AND conditions
+// stripped and commutative AND/OR conditions are ordered
 func reshape(tree *pg_query.ParseResult) error {
 	if tree == nil {
 		return nil
@@ -487,8 +487,8 @@ func reshapeSelect(s *pg_query.SelectStmt) {
 		}
 	}
 
-	sortAndTree(s.WhereClause)
-	sortAndTree(s.HavingClause)
+	sortBoolTree(s.WhereClause)
+	sortBoolTree(s.HavingClause)
 }
 
 func reshapeUpdate(u *pg_query.UpdateStmt) {
@@ -533,7 +533,7 @@ func reshapeUpdate(u *pg_query.UpdateStmt) {
 		}
 	}
 
-	sortAndTree(u.WhereClause)
+	sortBoolTree(u.WhereClause)
 }
 
 func reshapeDelete(d *pg_query.DeleteStmt) {
@@ -572,7 +572,7 @@ func reshapeDelete(d *pg_query.DeleteStmt) {
 		}
 	}
 
-	sortAndTree(d.WhereClause)
+	sortBoolTree(d.WhereClause)
 }
 
 func reshapeWithClause(w *pg_query.WithClause) {
@@ -897,23 +897,24 @@ func rewriteInSelect(s *pg_query.SelectStmt, dec map[string][]*pg_query.Node) {
 	}
 }
 
-func sortAndTree(n *pg_query.Node) {
+func sortBoolTree(n *pg_query.Node) {
 	if n == nil {
 		return
 	}
 	switch v := n.Node.(type) {
 	case *pg_query.Node_BoolExpr:
 		for _, a := range v.BoolExpr.Args {
-			sortAndTree(a)
+			sortBoolTree(a)
 		}
-		if v.BoolExpr.Boolop == pg_query.BoolExprType_AND_EXPR {
+		switch v.BoolExpr.Boolop {
+		case pg_query.BoolExprType_AND_EXPR, pg_query.BoolExprType_OR_EXPR:
 			sort.SliceStable(v.BoolExpr.Args, func(i, j int) bool {
 				return argSortKey(v.BoolExpr.Args[i]) < argSortKey(v.BoolExpr.Args[j])
 			})
 		}
 	case *pg_query.Node_AExpr:
-		sortAndTree(v.AExpr.Lexpr)
-		sortAndTree(v.AExpr.Rexpr)
+		sortBoolTree(v.AExpr.Lexpr)
+		sortBoolTree(v.AExpr.Rexpr)
 	}
 }
 
