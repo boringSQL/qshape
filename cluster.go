@@ -18,14 +18,14 @@ type (
 	}
 
 	Cluster struct {
-		Fingerprint     string             `json:"fingerprint"`
-		Canonical       string             `json:"canonical"`
-		Members         []Query            `json:"members"`
-		TotalCalls      int64              `json:"total_calls"`
-		TotalExecTimeMs float64            `json:"total_exec_time_ms,omitempty"`
-		MeanExecTimeMs  float64            `json:"mean_exec_time_ms,omitempty"`
-		Rows            int64              `json:"rows,omitempty"`
-		Params          []ParamAttribution `json:"params,omitempty"`
+		Fingerprint     string                  `json:"fingerprint"`
+		Canonical       string                  `json:"canonical"`
+		Members         []Query                 `json:"members"`
+		TotalCalls      int64                   `json:"total_calls"`
+		TotalExecTimeMs float64                 `json:"total_exec_time_ms,omitempty"`
+		MeanExecTimeMs  float64                 `json:"mean_exec_time_ms,omitempty"`
+		Rows            int64                   `json:"rows,omitempty"`
+		Params          []ParamAttribution      `json:"params,omitempty"`
 		Owners          map[string]string       `json:"owners,omitempty"`
 		RegresqlMeta    map[string]string       `json:"regresql_meta,omitempty"`
 		DynamicTagKeys  []DynamicKeyObservation `json:"dynamic_tag_keys,omitempty"`
@@ -50,6 +50,8 @@ type (
 // parse become singleton clusters with empty Fingerprint. Output is
 // sorted by descending TotalExecTimeMs (when any timing is present),
 // otherwise by descending TotalCalls, with Fingerprint as the tiebreaker.
+// Each cluster's Members are sorted by QueryID, then Raw, and Canonical is
+// the normalized form of the first member after that sort.
 func Group(queries []Query) ([]Cluster, error) {
 	return GroupWithPolicy(queries, tags.DefaultPolicy())
 }
@@ -74,14 +76,8 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 		}
 		c, ok := groups[fp]
 		if !ok {
-			canonical, derr := Normalize(q.Raw)
-			if derr != nil {
-				canonical = q.Raw
-			}
-			c = &Cluster{
-				Fingerprint: fp,
-				Canonical:   canonical,
-			}
+			// Canonical is derived once the members are sorted, below
+			c = &Cluster{Fingerprint: fp}
 			groups[fp] = c
 		}
 		c.Members = append(c.Members, q)
@@ -98,6 +94,8 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 		if c.TotalCalls > 0 {
 			c.MeanExecTimeMs = c.TotalExecTimeMs / float64(c.TotalCalls)
 		}
+		sortMembers(c)
+		setCanonical(c)
 		applyTags(c, policy)
 		out = append(out, *c)
 	}
@@ -121,6 +119,33 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 		return out[i].Fingerprint < out[j].Fingerprint
 	})
 	return out, nil
+}
+
+// sortMembers makes member order deterministic (QueryID, then Raw):
+// pg_stat_statements ties permute between captures, and consumers hashing
+// the member list would read that as a change. Also pins which member
+// applyTags reads.
+func sortMembers(c *Cluster) {
+	sort.Slice(c.Members, func(i, j int) bool {
+		if c.Members[i].QueryID != c.Members[j].QueryID {
+			return c.Members[i].QueryID < c.Members[j].QueryID
+		}
+		return c.Members[i].Raw < c.Members[j].Raw
+	})
+}
+
+// setCanonical pins Canonical to the sorted-first member: members sharing a
+// fingerprint can still normalize differently (IN lists of different lengths
+// cluster together), and attribution and stub generation run off this field.
+func setCanonical(c *Cluster) {
+	if len(c.Members) == 0 {
+		return
+	}
+	canonical, err := Normalize(c.Members[0].Raw)
+	if err != nil {
+		canonical = c.Members[0].Raw
+	}
+	c.Canonical = canonical
 }
 
 func applyTags(c *Cluster, policy *tags.Policy) {
