@@ -90,6 +90,144 @@ func TestGroupOrdering(t *testing.T) {
 	}
 }
 
+// Member order must be deterministic: pg_stat_statements ties permute
+// between captures, and consumers hashing member queryids (e.g. dryrun's
+// content digest) would read that as a changed query.
+func TestGroupMembersSortedByQueryID(t *testing.T) {
+	// same fingerprint, fed in descending queryid order to prove Group is
+	// not just preserving input order
+	in := []Query{
+		{Raw: "SELECT id FROM users WHERE id = 3", QueryID: 300, Calls: 1},
+		{Raw: "SELECT id FROM users WHERE id = 1", QueryID: 100, Calls: 1},
+		{Raw: "SELECT id FROM users WHERE id = 2", QueryID: 200, Calls: 1},
+	}
+	out, err := Group(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(out))
+	}
+	got := make([]int64, len(out[0].Members))
+	for i, m := range out[0].Members {
+		got[i] = m.QueryID
+	}
+	want := []int64{100, 200, 300}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Members queryids = %v, want %v", got, want)
+		}
+	}
+}
+
+// Without queryids (file-fed input rather than pg_stat_statements), Raw is
+// the fallback key so ordering stays deterministic.
+func TestGroupMembersSortedByRawWithoutQueryID(t *testing.T) {
+	in := []Query{
+		{Raw: "SELECT id FROM users WHERE id = 3", Calls: 1},
+		{Raw: "SELECT id FROM users WHERE id = 1", Calls: 1},
+		{Raw: "SELECT id FROM users WHERE id = 2", Calls: 1},
+	}
+	out, err := Group(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 cluster, got %d", len(out))
+	}
+	for i := 1; i < len(out[0].Members); i++ {
+		if out[0].Members[i-1].Raw > out[0].Members[i].Raw {
+			t.Fatalf("Members not sorted by Raw: %q then %q",
+				out[0].Members[i-1].Raw, out[0].Members[i].Raw)
+		}
+	}
+}
+
+// Canonical must not depend on which member was read first. Most clustered
+// members deparse to the same text — that is what reshape is for, so alias
+// variants and AND-reorders never expose this — but members differing in list
+// arity share a fingerprint and normalize apart. Whichever arrived first used
+// to win, so attributeCluster attributed a two-param or a three-param query
+// depending on pg_stat_statements' row order, and regresql stubs regenerated
+// with different SQL for an unchanged database.
+func TestGroupCanonicalIndependentOfInputOrder(t *testing.T) {
+	forward := []Query{
+		{Raw: "SELECT id FROM users WHERE id IN ($1, $2)", QueryID: 100, Calls: 1},
+		{Raw: "SELECT id FROM users WHERE id IN ($1, $2, $3)", QueryID: 200, Calls: 1},
+	}
+	reversed := []Query{forward[1], forward[0]}
+
+	a, err := Group(forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Group(reversed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a) != 1 || len(b) != 1 {
+		t.Fatalf("expected 1 cluster each, got %d and %d", len(a), len(b))
+	}
+	if a[0].Canonical != b[0].Canonical {
+		t.Errorf("Canonical is input-order dependent: %q vs %q", a[0].Canonical, b[0].Canonical)
+	}
+
+	// and specifically the lowest-queryid member, not merely a stable pick
+	want, err := Normalize(forward[0].Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a[0].Canonical != want {
+		t.Errorf("Canonical = %q, want the queryid=100 member's form %q", a[0].Canonical, want)
+	}
+}
+
+// Same rows in a different input order must yield the same member lists.
+func TestGroupMemberOrderIndependentOfInputOrder(t *testing.T) {
+	forward := []Query{
+		{Raw: "SELECT id FROM users WHERE id = 1", QueryID: 100, Calls: 5},
+		{Raw: "SELECT id FROM users WHERE id = 2", QueryID: 200, Calls: 5},
+		{Raw: "SELECT name FROM accounts WHERE id = 1", QueryID: 300, Calls: 5},
+	}
+	reversed := []Query{forward[2], forward[1], forward[0]}
+
+	a, err := Group(forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Group(reversed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a) != len(b) {
+		t.Fatalf("cluster counts differ: %d vs %d", len(a), len(b))
+	}
+
+	membersByFingerprint := func(cs []Cluster) map[string][]int64 {
+		out := make(map[string][]int64, len(cs))
+		for _, c := range cs {
+			ids := make([]int64, len(c.Members))
+			for i, m := range c.Members {
+				ids[i] = m.QueryID
+			}
+			out[c.Fingerprint] = ids
+		}
+		return out
+	}
+
+	ja, err := json.Marshal(membersByFingerprint(a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jb, err := json.Marshal(membersByFingerprint(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ja) != string(jb) {
+		t.Errorf("member order is input-order dependent:\n forward  = %s\n reversed = %s", ja, jb)
+	}
+}
+
 // Alias-only variants collapse (reshape strips decorative aliases);
 // the LIMIT variant stays in its own cluster because LIMIT changes plan
 // shape and LIMIT subsumption is intentionally out of scope.
