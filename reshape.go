@@ -80,7 +80,9 @@ func applyParamRemap(n *pg_query.Node, remap map[int32]int32) {
 // forEachChild invokes f on every immediate child Node of n that can
 // contain a ParamRef. This is intentionally broader than the reshape
 // walkers (no scope logic needed here) but still a fixed set of cases —
-// new pg_query Node types just mean params inside them won't be renumbered
+// new pg_query Node types just mean params inside them won't be renumbered.
+// stripSortClause also rides this walker; a missing case additionally leaves
+// that subtree's ORDER BY in place and fragments its CostKey.
 func forEachChild(n *pg_query.Node, f func(*pg_query.Node)) {
 	if n == nil {
 		return
