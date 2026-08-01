@@ -19,8 +19,14 @@ type (
 		// spilled out of work_mem. Pointers because a caller that did not collect them
 		// (an older pg_stat_statements read, a fixture) means unknown, and 0 would say
 		// the statement spilled nothing.
-		TempBlksRead    *int64 `json:"temp_blks_read,omitempty"`
-		TempBlksWritten *int64 `json:"temp_blks_written,omitempty"`
+		TempBlksRead         *int64   `json:"temp_blks_read,omitempty"`
+		TempBlksWritten      *int64   `json:"temp_blks_written,omitempty"`
+		SharedBlksHit        *int64   `json:"shared_blks_hit,omitempty"`
+		SharedBlksRead       *int64   `json:"shared_blks_read,omitempty"`
+		SharedBlksDirtied    *int64   `json:"shared_blks_dirtied,omitempty"`
+		SharedBlksWritten    *int64   `json:"shared_blks_written,omitempty"`
+		SharedBlkReadTimeMs  *float64 `json:"shared_blk_read_time_ms,omitempty"`
+		SharedBlkWriteTimeMs *float64 `json:"shared_blk_write_time_ms,omitempty"`
 	}
 
 	Cluster struct {
