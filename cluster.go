@@ -15,16 +15,27 @@ type (
 		MeanExecTimeMs   float64 `json:"mean_exec_time_ms,omitempty"`
 		StddevExecTimeMs float64 `json:"stddev_exec_time_ms,omitempty"`
 		Rows             int64   `json:"rows,omitempty"`
+		// Temp blocks read and written by this statement: the sorts and hashes that
+		// spilled out of work_mem. Pointers because a caller that did not collect them
+		// (an older pg_stat_statements read, a fixture) means unknown, and 0 would say
+		// the statement spilled nothing.
+		TempBlksRead    *int64 `json:"temp_blks_read,omitempty"`
+		TempBlksWritten *int64 `json:"temp_blks_written,omitempty"`
 	}
 
 	Cluster struct {
-		Fingerprint     string                  `json:"fingerprint"`
-		Canonical       string                  `json:"canonical"`
-		Members         []Query                 `json:"members"`
-		TotalCalls      int64                   `json:"total_calls"`
-		TotalExecTimeMs float64                 `json:"total_exec_time_ms,omitempty"`
-		MeanExecTimeMs  float64                 `json:"mean_exec_time_ms,omitempty"`
-		Rows            int64                   `json:"rows,omitempty"`
+		Fingerprint     string  `json:"fingerprint"`
+		Canonical       string  `json:"canonical"`
+		Members         []Query `json:"members"`
+		TotalCalls      int64   `json:"total_calls"`
+		TotalExecTimeMs float64 `json:"total_exec_time_ms,omitempty"`
+		MeanExecTimeMs  float64 `json:"mean_exec_time_ms,omitempty"`
+		Rows            int64   `json:"rows,omitempty"`
+		// Summed over the members, and nil unless EVERY member carried them: a partial
+		// sum understates the spill, which is the direction that makes "raise work_mem"
+		// advice wrong.
+		TempBlksRead    *int64                  `json:"temp_blks_read,omitempty"`
+		TempBlksWritten *int64                  `json:"temp_blks_written,omitempty"`
 		Params          []ParamAttribution      `json:"params,omitempty"`
 		Owners          map[string]string       `json:"owners,omitempty"`
 		RegresqlMeta    map[string]string       `json:"regresql_meta,omitempty"`
@@ -56,6 +67,25 @@ func Group(queries []Query) ([]Cluster, error) {
 	return GroupWithPolicy(queries, tags.DefaultPolicy())
 }
 
+// sumTempBlocks totals an optional counter over a cluster's members, and returns nil as
+// soon as one member does not carry it. A partial sum would read as a smaller spill than
+// really happened, and understating a spill is what makes "raise work_mem" advice point
+// the wrong way.
+func sumTempBlocks(members []Query, pick func(Query) *int64) *int64 {
+	if len(members) == 0 {
+		return nil
+	}
+	var total int64
+	for _, m := range members {
+		v := pick(m)
+		if v == nil {
+			return nil
+		}
+		total += *v
+	}
+	return &total
+}
+
 func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 	groups := make(map[string]*Cluster)
 	var unparseable []Cluster
@@ -84,6 +114,15 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 		c.TotalCalls += q.Calls
 		c.TotalExecTimeMs += q.TotalExecTimeMs
 		c.Rows += q.Rows
+	}
+
+	for _, c := range groups {
+		c.TempBlksRead = sumTempBlocks(c.Members, func(q Query) *int64 { return q.TempBlksRead })
+		c.TempBlksWritten = sumTempBlocks(c.Members, func(q Query) *int64 { return q.TempBlksWritten })
+	}
+	for i := range unparseable {
+		unparseable[i].TempBlksRead = unparseable[i].Members[0].TempBlksRead
+		unparseable[i].TempBlksWritten = unparseable[i].Members[0].TempBlksWritten
 	}
 
 	if policy == nil {
