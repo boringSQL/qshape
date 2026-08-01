@@ -392,3 +392,45 @@ func TestClusterRoundTripJSON(t *testing.T) {
 		t.Errorf("round-trip mismatch:\nfirst:  %s\nsecond: %s", first, second)
 	}
 }
+
+// Temp blocks total over a cluster's members, and go unknown the moment one member does
+// not carry them: a partial sum reads as a smaller spill than really happened, and
+// understating a spill is what makes "raise work_mem" advice point the wrong way.
+func TestGroupSumsTempBlocks(t *testing.T) {
+	n := func(v int64) *int64 { return &v }
+	both, err := Group([]Query{
+		{Raw: "SELECT * FROM t WHERE id = 1", QueryID: 1, Calls: 1, TempBlksRead: n(10), TempBlksWritten: n(4)},
+		{Raw: "SELECT * FROM t WHERE id = 2", QueryID: 2, Calls: 1, TempBlksRead: n(5), TempBlksWritten: n(1)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(both) != 1 {
+		t.Fatalf("clusters = %d, want 1", len(both))
+	}
+	if both[0].TempBlksRead == nil || *both[0].TempBlksRead != 15 {
+		t.Fatalf("temp read = %v, want 15", both[0].TempBlksRead)
+	}
+	if both[0].TempBlksWritten == nil || *both[0].TempBlksWritten != 5 {
+		t.Fatalf("temp written = %v, want 5", both[0].TempBlksWritten)
+	}
+
+	partial, err := Group([]Query{
+		{Raw: "SELECT * FROM t WHERE id = 1", QueryID: 1, Calls: 1, TempBlksRead: n(10)},
+		{Raw: "SELECT * FROM t WHERE id = 2", QueryID: 2, Calls: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial[0].TempBlksRead != nil {
+		t.Fatalf("temp read = %v, want unknown when a member did not carry it", *partial[0].TempBlksRead)
+	}
+
+	none, err := Group([]Query{{Raw: "SELECT 1", QueryID: 1, Calls: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none[0].TempBlksRead != nil || none[0].TempBlksWritten != nil {
+		t.Fatal("a cluster nobody measured must not report zero blocks")
+	}
+}
