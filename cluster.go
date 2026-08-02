@@ -8,10 +8,11 @@ import (
 
 type (
 	Query struct {
-		Raw              string  `json:"raw"`
-		QueryID          int64   `json:"queryid,omitempty"`
-		Calls            int64   `json:"calls,omitempty"`
-		TotalExecTimeMs  float64 `json:"total_exec_time_ms,omitempty"`
+		Raw             string  `json:"raw"`
+		QueryID         int64   `json:"queryid,omitempty"`
+		Calls           int64   `json:"calls,omitempty"`
+		TotalExecTimeMs float64 `json:"total_exec_time_ms,omitempty"`
+		// Ignored by Group; a cluster's mean is derived from total/calls.
 		MeanExecTimeMs   float64 `json:"mean_exec_time_ms,omitempty"`
 		StddevExecTimeMs float64 `json:"stddev_exec_time_ms,omitempty"`
 		Rows             int64   `json:"rows,omitempty"`
@@ -106,7 +107,6 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 				TotalCalls:      q.Calls,
 				TotalExecTimeMs: q.TotalExecTimeMs,
 				Rows:            q.Rows,
-				MeanExecTimeMs:  q.MeanExecTimeMs,
 			})
 			continue
 		}
@@ -129,6 +129,9 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 	for i := range unparseable {
 		unparseable[i].TempBlksRead = unparseable[i].Members[0].TempBlksRead
 		unparseable[i].TempBlksWritten = unparseable[i].Members[0].TempBlksWritten
+		if unparseable[i].TotalCalls > 0 {
+			unparseable[i].MeanExecTimeMs = unparseable[i].TotalExecTimeMs / float64(unparseable[i].TotalCalls)
+		}
 	}
 
 	if policy == nil {
