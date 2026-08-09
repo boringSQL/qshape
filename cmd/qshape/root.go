@@ -18,6 +18,7 @@ func Run() error {
 		captureCmd(),
 		attributeCmd(),
 		regresqlStubCmd(),
+		sortsCmd(),
 		tagsCmd(),
 		extractTagsCmd(),
 		versionCmd(),
