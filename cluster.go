@@ -157,6 +157,8 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 		}
 	}
 
+	// Fingerprint is "" for every unparseable cluster, so ties must be broken down to
+	// the first member's QueryID; past that the clusters are indistinguishable.
 	sort.Slice(out, func(i, j int) bool {
 		if hasTiming && out[i].TotalExecTimeMs != out[j].TotalExecTimeMs {
 			return out[i].TotalExecTimeMs > out[j].TotalExecTimeMs
@@ -164,7 +166,13 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 		if out[i].TotalCalls != out[j].TotalCalls {
 			return out[i].TotalCalls > out[j].TotalCalls
 		}
-		return out[i].Fingerprint < out[j].Fingerprint
+		if out[i].Fingerprint != out[j].Fingerprint {
+			return out[i].Fingerprint < out[j].Fingerprint
+		}
+		if out[i].Canonical != out[j].Canonical {
+			return out[i].Canonical < out[j].Canonical
+		}
+		return firstQueryID(out[i]) < firstQueryID(out[j])
 	})
 	return out, nil
 }
@@ -180,6 +188,14 @@ func sortMembers(c *Cluster) {
 		}
 		return c.Members[i].Raw < c.Members[j].Raw
 	})
+}
+
+// firstQueryID is the last sort tiebreaker; 0 keeps an empty cluster safe.
+func firstQueryID(c Cluster) int64 {
+	if len(c.Members) == 0 {
+		return 0
+	}
+	return c.Members[0].QueryID
 }
 
 // setCanonical pins Canonical to the sorted-first member: members sharing a
