@@ -1,0 +1,167 @@
+[
+  {
+    "raw": "SELECT id FROM orders",
+    "fingerprint": "sha1:9f0e1636a4c9701f",
+    "canonical": "SELECT id FROM orders"
+  },
+  {
+    "raw": "SELECT a, b FROM orders JOIN users ON users.id = orders.user_id WHERE a = $1 AND b = $2 GROUP BY a ORDER BY b LIMIT $3",
+    "fingerprint": "sha1:da2d3f425dfba39e",
+    "canonical": "SELECT a, b FROM orders JOIN users ON users.id = orders.user_id WHERE a = $1 AND b = $2 GROUP BY a ORDER BY b LIMIT $3"
+  },
+  {
+    "raw": "SELECT count(*), coalesce(sum(total), $1) FROM orders WHERE created_at \u003e $2",
+    "fingerprint": "sha1:e1c67b34c304067d",
+    "canonical": "SELECT count(*), COALESCE(sum(total), $1) FROM orders WHERE created_at \u003e $2"
+  },
+  {
+    "raw": "INSERT INTO orders (id, total) VALUES ($1, $2)",
+    "fingerprint": "sha1:20c072003593fdaf",
+    "canonical": "INSERT INTO orders (id, total) VALUES ($1, $2)"
+  },
+  {
+    "raw": "INSERT INTO orders (id) SELECT id FROM staging_orders ON CONFLICT (id) DO UPDATE SET id = $1",
+    "fingerprint": "sha1:fce057cf791bb68d",
+    "canonical": "INSERT INTO orders (id) SELECT id FROM staging_orders ON CONFLICT (id) DO UPDATE SET id = $1"
+  },
+  {
+    "raw": "UPDATE orders SET total = $1 FROM users WHERE users.id = orders.user_id",
+    "fingerprint": "sha1:3c0a45ad7ebe68ec",
+    "canonical": "UPDATE orders SET total = $1 FROM users WHERE users.id = orders.user_id"
+  },
+  {
+    "raw": "DELETE FROM orders USING users WHERE users.id = orders.user_id",
+    "fingerprint": "sha1:871faadb43628ea4",
+    "canonical": "DELETE FROM orders USING users WHERE users.id = orders.user_id"
+  },
+  {
+    "raw": "MERGE INTO orders USING staging_orders ON orders.id = staging_orders.id WHEN MATCHED THEN UPDATE SET total = staging_orders.total",
+    "fingerprint": "sha1:c988f0836552e744",
+    "canonical": "MERGE INTO orders USING staging_orders ON orders.id = staging_orders.id WHEN MATCHED THEN UPDATE SET total = staging_orders.total"
+  },
+  {
+    "raw": "WITH recent AS (SELECT id FROM orders WHERE created_at \u003e $1) SELECT * FROM recent JOIN users ON users.id = recent.id",
+    "fingerprint": "sha1:a1f283a2e41e1a25",
+    "canonical": "WITH recent AS (SELECT id FROM orders WHERE created_at \u003e $1) SELECT * FROM recent JOIN users ON users.id = recent.id"
+  },
+  {
+    "raw": "WITH RECURSIVE tree AS (SELECT id, parent_id FROM project WHERE parent_id IS NULL UNION ALL SELECT p.id, p.parent_id FROM project p JOIN tree ON p.parent_id = tree.id) SELECT * FROM tree",
+    "fingerprint": "sha1:d1dd148b216975b5",
+    "canonical": "WITH RECURSIVE tree AS (SELECT id, parent_id FROM project WHERE parent_id IS NULL UNION ALL SELECT project.id, project.parent_id FROM project JOIN tree ON project.parent_id = tree.id) SELECT * FROM tree"
+  },
+  {
+    "raw": "SELECT id FROM orders UNION ALL SELECT id FROM archived_orders ORDER BY id",
+    "fingerprint": "sha1:06ea42f0cbbcfcad",
+    "canonical": "SELECT id FROM orders UNION ALL SELECT id FROM archived_orders ORDER BY id"
+  },
+  {
+    "raw": "SELECT * FROM (SELECT user_id FROM time_entry) sub JOIN users ON users.id = sub.user_id",
+    "fingerprint": "sha1:4449dfc5af29442e",
+    "canonical": "SELECT * FROM (SELECT user_id FROM time_entry) sub JOIN users ON users.id = sub.user_id"
+  },
+  {
+    "raw": "SELECT v FROM task CROSS JOIN LATERAL unnest(task.assignee_user_ids) v",
+    "fingerprint": "sha1:afdc20b0d76c41b1",
+    "canonical": "SELECT v FROM task CROSS JOIN LATERAL unnest(task.assignee_user_ids) v"
+  },
+  {
+    "raw": "SELECT * FROM orders WHERE EXISTS (SELECT $1 FROM goal WHERE goal.user_id = orders.user_id)",
+    "fingerprint": "sha1:cb802f03dec0a7c9",
+    "canonical": "SELECT * FROM orders WHERE EXISTS (SELECT $1 FROM goal WHERE goal.user_id = orders.user_id)"
+  },
+  {
+    "raw": "SELECT a, CASE WHEN b \u003e $1 THEN $2 ELSE $3 END FROM t",
+    "fingerprint": "sha1:69f872dbd1de1ea6",
+    "canonical": "SELECT a, CASE WHEN b \u003e $1 THEN $2 ELSE $3 END FROM t"
+  },
+  {
+    "raw": "SELECT count(*) FILTER (WHERE a \u003e $1) OVER (PARTITION BY b ORDER BY c) FROM t",
+    "fingerprint": "sha1:49c45307f965e2e5",
+    "canonical": "SELECT count(*) FILTER (WHERE a \u003e $1) OVER (PARTITION BY b ORDER BY c) FROM t"
+  },
+  {
+    "raw": "SELECT 'a literal with FROM and WHERE and JOIN inside' FROM t",
+    "fingerprint": "sha1:f614fc27e224ac84",
+    "canonical": "SELECT 'a literal with FROM and WHERE and JOIN inside' FROM t"
+  },
+  {
+    "raw": "SELECT $$dollar quoted with ) paren and FROM$$ FROM t",
+    "fingerprint": "sha1:f614fc27e224ac84",
+    "canonical": "SELECT 'dollar quoted with ) paren and FROM' FROM t"
+  },
+  {
+    "raw": "SELECT $tag$tagged $$ nested$tag$ FROM t",
+    "fingerprint": "sha1:f614fc27e224ac84",
+    "canonical": "SELECT 'tagged $$ nested' FROM t"
+  },
+  {
+    "raw": "SELECT 'book'\n'end' AS continued FROM t",
+    "fingerprint": "sha1:f614fc27e224ac84",
+    "canonical": "SELECT 'bookend' AS continued FROM t"
+  },
+  {
+    "raw": "SELECT \"select\", \"from\", \"weird\"\"quote\" FROM \"where\"",
+    "fingerprint": "sha1:77d3d4e0dfe9b10a",
+    "canonical": "SELECT \"select\", \"from\", \"weird\"\"quote\" FROM \"where\""
+  },
+  {
+    "raw": "SELECT a /* block comment */ FROM t",
+    "fingerprint": "sha1:2f2a6b825f662fa2",
+    "canonical": "SELECT a FROM t"
+  },
+  {
+    "raw": "SELECT a -- line comment\nFROM t",
+    "fingerprint": "sha1:2f2a6b825f662fa2",
+    "canonical": "SELECT a FROM t"
+  },
+  {
+    "raw": "SELECT E'\\n', U\u0026'd\\0061t' FROM t",
+    "fingerprint": "sha1:f614fc27e224ac84",
+    "canonical": "SELECT '\n', 'dat' FROM t"
+  },
+  {
+    "raw": "SELECT a - -b, +1, -1, 1 - -1 FROM t",
+    "fingerprint": "sha1:63687aadf7a253b5",
+    "canonical": "SELECT a - (- b), + 1, -1, 1 - -1 FROM t"
+  },
+  {
+    "raw": "SELECT a::int, b::text, cast(c AS numeric) FROM t",
+    "fingerprint": "sha1:fefb58c8e6de4c27",
+    "canonical": "SELECT a::int, b::text, c::numeric FROM t"
+  },
+  {
+    "raw": "SELECT a || b, c != d, e \u003c\u003e f, g @\u003e h, i \u003c@ j FROM t",
+    "fingerprint": "sha1:5e033f98f89964d5",
+    "canonical": "SELECT a || b, c \u003c\u003e d, e \u003c\u003e f, g @\u003e h, i \u003c@ j FROM t"
+  },
+  {
+    "raw": "SELECT j-\u003e\u003e'k', j-\u003e'k', j#\u003e\u003e'{k}' FROM t",
+    "fingerprint": "sha1:089d86ef9dd61b21",
+    "canonical": "SELECT j -\u003e\u003e 'k', j -\u003e 'k', j #\u003e\u003e '{k}' FROM t"
+  },
+  {
+    "raw": "SELECT * FROM t WHERE x ~ '^a' AND y !~~ 'b'",
+    "fingerprint": "sha1:ecac970dce9813a4",
+    "canonical": "SELECT * FROM t WHERE x ~ '^a' AND y !~~ 'b'"
+  },
+  {
+    "raw": "SELECT (ARRAY[$1, $2])[$3] FROM t",
+    "fingerprint": "",
+    "canonical": "SELECT (ARRAY[$1, $2])[$3] FROM t"
+  },
+  {
+    "raw": "SELECT 1.5, .5, 1e10 FROM t",
+    "fingerprint": "sha1:f614fc27e224ac84",
+    "canonical": "SELECT 1.5, .5, 1e10 FROM t"
+  },
+  {
+    "raw": "SELECT a FROM t WHERE b IN ($1, $2) AND c BETWEEN $3 AND $4",
+    "fingerprint": "sha1:d3b2ba31cc07f34a",
+    "canonical": "SELECT a FROM t WHERE b IN ($1, $2) AND c BETWEEN $3 AND $4"
+  },
+  {
+    "raw": "SELECT * FROM public.orders JOIN tenant_42.users ON true",
+    "fingerprint": "sha1:7b6b4af06463e11b",
+    "canonical": "SELECT * FROM public.orders JOIN tenant_42.users ON true"
+  }
+]

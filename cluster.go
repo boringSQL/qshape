@@ -70,6 +70,9 @@ type (
 // otherwise by descending TotalCalls, with Fingerprint as the tiebreaker.
 // Each cluster's Members are sorted by QueryID, then Raw, and Canonical is
 // the normalized form of the first member after that sort.
+//
+// Fingerprinting already uses all cores; callers should not fan Group out across their
+// own worker pool.
 func Group(queries []Query) ([]Cluster, error) {
 	return GroupWithPolicy(queries, tags.DefaultPolicy())
 }
@@ -97,8 +100,16 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 	groups := make(map[string]*Cluster)
 	var unparseable []Cluster
 
-	for _, q := range queries {
-		fp, err := Fingerprint(q.Raw)
+	// Fingerprinting is the expensive half, so it runs across cores first; grouping
+	// stays sequential over the original order, which consumers hash.
+	shapes := fingerprintAll(queries)
+	// The text each fingerprint was computed from, reused by setCanonical instead of
+	// normalizing the same SQL twice. Keyed by raw SQL: identical raw text normalizes
+	// identically.
+	canonicalByRaw := make(map[string]string, len(queries))
+
+	for i, q := range queries {
+		fp, canonical, err := shapes[i].fingerprint, shapes[i].canonical, shapes[i].err
 		if err != nil {
 			unparseable = append(unparseable, Cluster{
 				Fingerprint:     "",
@@ -110,6 +121,7 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 			})
 			continue
 		}
+		canonicalByRaw[q.Raw] = canonical
 		c, ok := groups[fp]
 		if !ok {
 			// Canonical is derived once the members are sorted, below
@@ -143,7 +155,7 @@ func GroupWithPolicy(queries []Query, policy *tags.Policy) ([]Cluster, error) {
 			c.MeanExecTimeMs = c.TotalExecTimeMs / float64(c.TotalCalls)
 		}
 		sortMembers(c)
-		setCanonical(c)
+		setCanonical(c, canonicalByRaw)
 		applyTags(c, policy)
 		out = append(out, *c)
 	}
@@ -190,26 +202,29 @@ func sortMembers(c *Cluster) {
 	})
 }
 
+// setCanonical pins Canonical to the sorted-first member: members sharing a
+// fingerprint can still normalize differently (IN lists of different lengths
+// cluster together), and attribution and stub generation run off this field.
+func setCanonical(c *Cluster, canonicalByRaw map[string]string) {
+	if len(c.Members) == 0 {
+		return
+	}
+	raw := c.Members[0].Raw
+	// A miss means a cluster built outside GroupWithPolicy; raw is Normalize's own
+	// fallback.
+	canonical, ok := canonicalByRaw[raw]
+	if !ok {
+		canonical = raw
+	}
+	c.Canonical = canonical
+}
+
 // firstQueryID is the last sort tiebreaker; 0 keeps an empty cluster safe.
 func firstQueryID(c Cluster) int64 {
 	if len(c.Members) == 0 {
 		return 0
 	}
 	return c.Members[0].QueryID
-}
-
-// setCanonical pins Canonical to the sorted-first member: members sharing a
-// fingerprint can still normalize differently (IN lists of different lengths
-// cluster together), and attribution and stub generation run off this field.
-func setCanonical(c *Cluster) {
-	if len(c.Members) == 0 {
-		return
-	}
-	canonical, err := Normalize(c.Members[0].Raw)
-	if err != nil {
-		canonical = c.Members[0].Raw
-	}
-	c.Canonical = canonical
 }
 
 func applyTags(c *Cluster, policy *tags.Policy) {
