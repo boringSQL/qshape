@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
-	"strconv"
+	"strings"
 
 	"github.com/boringsql/qshape"
 	"github.com/jackc/pgx/v5"
@@ -17,6 +16,10 @@ import (
 type (
 	attrCtx struct {
 		byPosition map[int]*qshape.ParamAttribution
+		// Below PG 17, ruleutils prints InitPlan outputs as `$N`, in the same
+		// namespace as the query's own parameters, so those numbers are
+		// ambiguous and never attributed.
+		initPlanParams []int
 	}
 
 	tableRef struct {
@@ -35,16 +38,10 @@ type (
 		RecheckCond  string          `json:"Recheck Cond"`
 		JoinFilter   string          `json:"Join Filter"`
 		MergeCond    string          `json:"Merge Cond"`
+		TIDCond      string          `json:"TID Cond"`
 		SubplanName  string          `json:"Subplan Name"`
 		Plans        json.RawMessage `json:"Plans"`
 	}
-)
-
-var (
-	// column op $N or $N op column — alias.column optional
-	paramCondRE = regexp.MustCompile(`(?:\(?(\w+)\.)?(\w+)\s*(?:=|<|>|<=|>=|<>|!=)\s*\$(\d+)|\$(\d+)\s*(?:=|<|>|<=|>=|<>|!=)\s*(?:\(?(\w+)\.)?(\w+)`)
-	// column IN ($N, $M, ...) — capture only the first param and the column
-	paramInRE = regexp.MustCompile(`(?:\(?(\w+)\.)?(\w+)\s+(?:=\s*ANY\s*\()?IN\s*\(\s*\$(\d+)`)
 )
 
 func attributeCmd() *cobra.Command {
@@ -93,6 +90,7 @@ func runAttribute(inPath, connStr string, top int, verbose bool) error {
 	if err := validateSchemaVersion(&doc); err != nil {
 		return err
 	}
+	doc.SchemaVersion = currentSchemaVersion
 
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, connStr)
@@ -194,9 +192,12 @@ func attributeFromPlan(planJSON []byte, positions []int) []qshape.ParamAttributi
 	if len(plans) == 0 {
 		return noneEntries(positions, "")
 	}
-	c := &attrCtx{byPosition: map[int]*qshape.ParamAttribution{}}
-	walkPlan(plans[0].Plan, "", "", c)
-	return fillPositions(c.byPosition, positions)
+	ctx := &attrCtx{byPosition: map[int]*qshape.ParamAttribution{}}
+	walkPlan(plans[0].Plan, ctx)
+	for _, p := range ctx.initPlanParams {
+		delete(ctx.byPosition, p)
+	}
+	return fillPositions(ctx.byPosition, positions)
 }
 
 // readPlanJSON runs a multi-statement script (PREPARE; EXPLAIN; DEALLOCATE)
@@ -228,45 +229,16 @@ func readPlanJSON(ctx context.Context, conn *pgx.Conn, script string) ([]byte, e
 	return out, nil
 }
 
-// maxParamNumber scans sql for `$N` tokens and returns the highest N seen,
-// or 0 if none. Skips $-tags inside string and dollar-quoted contexts
+// maxParamNumber returns the highest $N in sql, or 0 if none.
 func maxParamNumber(sql string) int {
-	max := 0
-	for i := 0; i < len(sql); i++ {
-		c := sql[i]
-		switch c {
-		case '\'':
-			// skip to matching quote, honoring doubled ''
-			i++
-			for i < len(sql) {
-				if sql[i] == '\'' {
-					if i+1 < len(sql) && sql[i+1] == '\'' {
-						i += 2
-						continue
-					}
-					break
-				}
-				i++
-			}
-		case '$':
-			j := i + 1
-			n := 0
-			for j < len(sql) && sql[j] >= '0' && sql[j] <= '9' {
-				n = n*10 + int(sql[j]-'0')
-				j++
-			}
-			if j > i+1 {
-				if n > max {
-					max = n
-				}
-				i = j - 1
-			}
-		}
+	hi := 0
+	for _, n := range scanParams(sql) {
+		hi = max(hi, n)
 	}
-	return max
+	return hi
 }
 
-func walkPlan(raw json.RawMessage, parentSchema, parentTable string, ctx *attrCtx) {
+func walkPlan(raw json.RawMessage, ctx *attrCtx) {
 	if len(raw) == 0 {
 		return
 	}
@@ -277,95 +249,119 @@ func walkPlan(raw json.RawMessage, parentSchema, parentTable string, ctx *attrCt
 
 	// Track alias → table mapping so we can resolve `u.id = $1` to users.id.
 	// Function Scan on a system view like pg_catalog.pg_settings leaves
-	// RelationName empty but still sets Alias; use Alias as the table name
-	// so conds like `(name = $1)` attribute to pg_settings.name.
+	// RelationName empty but still sets Alias; use the alias as the table name
+	// so conds like `(name = $1)` attribute to pg_settings.name. A CTE or
+	// Subquery Scan alias is not a table statistics exist for, so those stay
+	// heuristic.
+	if _, returns, ok := strings.Cut(n.SubplanName, "(returns "); ok {
+		ctx.initPlanParams = append(ctx.initPlanParams, scanParams(returns)...)
+	}
 	aliasToTable := map[string]tableRef{}
-	fallbackTable := n.RelationName
-	fallbackSchema := n.Schema
+	var fallbackSchema, fallbackTable, fallbackConfidence string
 	if n.RelationName != "" {
 		t := tableRef{Schema: n.Schema, Table: n.RelationName}
 		aliasToTable[n.RelationName] = t
 		if n.Alias != "" && n.Alias != n.RelationName {
 			aliasToTable[n.Alias] = t
 		}
+		fallbackSchema, fallbackTable, fallbackConfidence = n.Schema, n.RelationName, "exact"
 	} else if n.Alias != "" {
-		// Function Scan / Values Scan: no Relation Name but Alias names the
-		// logical target (e.g. pg_settings). Attribute to the alias.
 		t := tableRef{Schema: n.Schema, Table: n.Alias}
 		aliasToTable[n.Alias] = t
-		fallbackTable = n.Alias
+		fallbackSchema, fallbackTable, fallbackConfidence = n.Schema, n.Alias, "heuristic"
+		if n.NodeType == "Function Scan" {
+			fallbackConfidence = "exact"
+		}
 	}
 
-	for _, cond := range []string{n.IndexCond, n.HashCond, n.Filter, n.RecheckCond, n.JoinFilter, n.MergeCond} {
+	for _, cond := range []string{
+		n.IndexCond, n.HashCond, n.Filter, n.RecheckCond, n.JoinFilter,
+		n.MergeCond, n.TIDCond,
+	} {
 		if cond == "" {
 			continue
 		}
-		attributeCond(cond, aliasToTable, fallbackSchema, fallbackTable, ctx)
+		attributeCond(cond, aliasToTable, fallbackSchema, fallbackTable, fallbackConfidence, ctx)
 	}
 
 	if len(n.Plans) > 0 {
 		var children []json.RawMessage
 		if err := json.Unmarshal(n.Plans, &children); err == nil {
 			for _, c := range children {
-				walkPlan(c, n.Schema, n.RelationName, ctx)
+				walkPlan(c, ctx)
 			}
 		}
 	}
 }
 
-func attributeCond(cond string, aliases map[string]tableRef, fallbackSchema, fallbackTable string, ctx *attrCtx) {
-	for _, m := range paramCondRE.FindAllStringSubmatch(cond, -1) {
-		// Two alternatives in the regex: [1]=alias,[2]=col,[3]=pos OR [4]=pos,[5]=alias,[6]=col
-		var aliasOrTable, col, posStr string
-		if m[3] != "" {
-			aliasOrTable, col, posStr = m[1], m[2], m[3]
-		} else {
-			aliasOrTable, col, posStr = m[5], m[6], m[4]
+func attributeCond(cond string, aliases map[string]tableRef, fallbackSchema, fallbackTable, fallbackConfidence string, ctx *attrCtx) {
+	forEachComparison(cond, func(left, right string) {
+		l := classifyOperand(left)
+		r := classifyOperand(right)
+		switch {
+		case l.kind == operandColumn && r.kind != operandColumn && r.kind != operandOther:
+			emitComparison(l, r, aliases, fallbackSchema, fallbackTable, fallbackConfidence, ctx)
+		case r.kind == operandColumn && l.kind != operandColumn && l.kind != operandOther:
+			emitComparison(r, l, aliases, fallbackSchema, fallbackTable, fallbackConfidence, ctx)
 		}
-		recordParam(aliasOrTable, col, posStr, aliases, fallbackSchema, fallbackTable, ctx)
+	})
+}
+
+// emitComparison records the parameter(s) on the non-column side against the
+// column side.
+func emitComparison(col, other operand, aliases map[string]tableRef, fallbackSchema, fallbackTable, fallbackConfidence string, ctx *attrCtx) {
+	ref, confidence := resolveColumn(col.alias, aliases, fallbackSchema, fallbackTable, fallbackConfidence)
+	column := col.column
+	if ref.Table == "" {
+		column = ""
 	}
-	for _, m := range paramInRE.FindAllStringSubmatch(cond, -1) {
-		recordParam(m[1], m[2], m[3], aliases, fallbackSchema, fallbackTable, ctx)
+
+	a := qshape.ParamAttribution{Schema: ref.Schema, Table: ref.Table, Column: column, Confidence: confidence}
+	switch other.kind {
+	case operandArrayParam:
+		a.Shape = "array"
+	case operandExpr:
+		a.Note = other.text
+		if confidence == "exact" && !exprHasOtherColumn(other.text) {
+			a.Confidence = "expression"
+		} else {
+			a.Confidence = "none"
+		}
+	}
+	for _, pos := range other.poss {
+		a.Position = pos
+		ctx.record(a)
 	}
 }
 
-func recordParam(aliasOrTable, col, posStr string, aliases map[string]tableRef, fallbackSchema, fallbackTable string, ctx *attrCtx) {
-	pos, err := strconv.Atoi(posStr)
-	if err != nil {
+// resolveColumn maps an operand qualifier to a table. An empty qualifier on a
+// scan node is PG pinning the column to that scan (exact); a qualifier that
+// doesn't resolve is a best-effort guess (heuristic).
+func resolveColumn(alias string, aliases map[string]tableRef, fallbackSchema, fallbackTable, fallbackConfidence string) (tableRef, string) {
+	if ref, ok := aliases[alias]; ok {
+		return ref, "exact"
+	}
+	if fallbackTable == "" {
+		return tableRef{}, "none"
+	}
+	ref := tableRef{Schema: fallbackSchema, Table: fallbackTable}
+	if alias == "" {
+		return ref, fallbackConfidence
+	}
+	return ref, "heuristic"
+}
+
+// confidenceRank orders attribution confidence for merging hits across plan
+// nodes; "none" ranks 0.
+var confidenceRank = map[string]int{"exact": 3, "expression": 2, "heuristic": 1}
+
+func (ctx *attrCtx) record(a qshape.ParamAttribution) {
+	if prev, ok := ctx.byPosition[a.Position]; ok && confidenceRank[prev.Confidence] >= confidenceRank[a.Confidence] {
 		return
 	}
-	// Prefer higher-confidence attribution if we already saw this param.
-	existing, already := ctx.byPosition[pos]
-	if already && existing.Confidence == "exact" {
+	if a.Confidence == "none" && a.Note == "" {
+		// fillPositions emits the bare none entry; don't shadow a real one.
 		return
 	}
-
-	ref, ok := aliases[aliasOrTable]
-	confidence := "exact"
-	if !ok {
-		if fallbackTable != "" {
-			ref = tableRef{Schema: fallbackSchema, Table: fallbackTable}
-			// An unqualified column in plan text (e.g. `Filter: (id = $1)`
-			// on an Index Scan over `session`) is PG telling us exactly
-			// which scan node the column belongs to — not a guess. Only
-			// downgrade to heuristic when we saw a qualifier that didn't
-			// resolve (stale alias, schema-qualified name we didn't
-			// track, or a subplan reference).
-			if aliasOrTable == "" {
-				confidence = "exact"
-			} else {
-				confidence = "heuristic"
-			}
-		} else {
-			confidence = "none"
-		}
-	}
-
-	ctx.byPosition[pos] = &qshape.ParamAttribution{
-		Position:   pos,
-		Schema:     ref.Schema,
-		Table:      ref.Table,
-		Column:     col,
-		Confidence: confidence,
-	}
+	ctx.byPosition[a.Position] = &a
 }

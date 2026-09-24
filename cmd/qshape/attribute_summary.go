@@ -22,6 +22,7 @@ type attrStats struct {
 	totalParams      int
 	attributedParams int
 	exact            int
+	expression       int
 	heuristic        int
 	partial          []partialCluster
 }
@@ -49,7 +50,12 @@ func (s *attrStats) add(fingerprint string, params []qshape.ParamAttribution) {
 		case "exact":
 			s.exact++
 			attributed++
+		case "expression":
+			exactAll = false
+			s.expression++
+			attributed++
 		default:
+			exactAll = false
 			s.heuristic++
 			attributed++
 		}
@@ -75,8 +81,8 @@ func printAttrSummary(w io.Writer, s attrStats, verbose bool) {
 	if s.totalParams > 0 {
 		pct = s.attributedParams * 100 / s.totalParams
 	}
-	fmt.Fprintf(w, "params: %d/%d attributed (%d%%) — exact %d, heuristic %d\n",
-		s.attributedParams, s.totalParams, pct, s.exact, s.heuristic)
+	fmt.Fprintf(w, "params: %d/%d attributed (%d%%) — exact %d, expression %d, heuristic %d\n",
+		s.attributedParams, s.totalParams, pct, s.exact, s.expression, s.heuristic)
 	fmt.Fprintf(w, "clusters: %d/%d fully attributed, %d/%d auto-fillable (%d without params, %d explain error)\n",
 		s.fullyAttributed, s.withParams, s.autoFillable, s.withParams, s.withoutParams, s.explainErrors)
 

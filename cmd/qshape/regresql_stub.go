@@ -58,6 +58,7 @@ auto-populated with real sampled values.`,
 	return cmd
 }
 
+//lint:ignore U1000 plans/ generation is temporarily disabled
 func loadFixture(path string) (*fixtureDoc, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -262,6 +263,8 @@ func writeSQLStub(path, slug string, c qshape.Cluster, sql string) error {
 
 // writePlanStub maps paramN → list of sample values (one per test case).
 // If values[p] is empty or absent, the plan uses REPLACE_ME.
+//
+//lint:ignore U1000 plans/ generation is temporarily disabled
 func writePlanStub(path string, params []string, values map[string][]any) error {
 	var b strings.Builder
 	if len(params) == 0 {
@@ -310,6 +313,12 @@ func sampleValuesForParams(paramNames []string, attrs []qshape.ParamAttribution,
 		}
 		a, ok := byPos[pos]
 		if !ok || a.Table == "" || a.Column == "" {
+			continue
+		}
+		// Only a plain scalar column comparison can be sampled directly; an
+		// array, limit/offset or expression needs a value the fixture can't
+		// supply.
+		if a.Kind != "" || a.Shape != "" || (a.Confidence != "exact" && a.Confidence != "heuristic") {
 			continue
 		}
 		vals := fix.sampleValues(a.Schema, a.Table, a.Column, n)

@@ -55,10 +55,13 @@ type (
 	}
 
 	ParamAttribution struct {
-		Position   int    `json:"position"`
-		Schema     string `json:"schema,omitempty"`
-		Table      string `json:"table,omitempty"`
-		Column     string `json:"column,omitempty"`
+		Position int    `json:"position"`
+		Kind     string `json:"kind,omitempty"`  // "" (column) | "limit" | "offset"
+		Shape    string `json:"shape,omitempty"` // "" (scalar) | "array"
+		Schema   string `json:"schema,omitempty"`
+		Table    string `json:"table,omitempty"`
+		Column   string `json:"column,omitempty"`
+		// exact | expression | heuristic | none
 		Confidence string `json:"confidence"`
 		Note       string `json:"note,omitempty"`
 	}

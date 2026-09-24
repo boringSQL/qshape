@@ -57,10 +57,36 @@ func TestSampleValuesSkipsUnattributed(t *testing.T) {
 	}
 }
 
+// Only a plain scalar column comparison can be sampled. Array, expression and
+// limit entries have a column but need a value the fixture can't supply.
+func TestSampleValuesSkipsArrayExpressionAndLimit(t *testing.T) {
+	fixJSON := `{
+      "tables": {
+        "auth.user_account": {
+          "columns": ["user_id"],
+          "rows": [[42], [99]]
+        }
+      }
+    }`
+	var fix fixtureDoc
+	if err := json.Unmarshal([]byte(fixJSON), &fix); err != nil {
+		t.Fatal(err)
+	}
+	attrs := []qshape.ParamAttribution{
+		{Position: 1, Schema: "auth", Table: "user_account", Column: "user_id", Shape: "array", Confidence: "exact"},
+		{Position: 2, Schema: "auth", Table: "user_account", Column: "user_id", Confidence: "expression"},
+		{Position: 3, Schema: "auth", Table: "user_account", Column: "user_id", Kind: "limit", Confidence: "exact"},
+	}
+	out := sampleValuesForParams([]string{"param1", "param2", "param3"}, attrs, &fix, 3)
+	if len(out) != 0 {
+		t.Errorf("expected no samples for array/expression/limit, got %+v", out)
+	}
+}
+
 func TestYAMLScalarStringEscaping(t *testing.T) {
 	cases := map[any]string{
-		"hello":   `"hello"`,
-		`a"b`:     `"a\"b"`,
+		"hello":  `"hello"`,
+		`a"b`:    `"a\"b"`,
 		int64(5): `5`,
 		nil:      `~`,
 		true:     `true`,

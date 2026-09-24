@@ -12,7 +12,7 @@ func TestAttributeCondAliasedEqual(t *testing.T) {
 	aliases := map[string]tableRef{
 		"u": {Schema: "auth", Table: "user_account"},
 	}
-	attributeCond("(u.user_id = $1)", aliases, "auth", "user_account", ctx)
+	attributeCond("(u.user_id = $1)", aliases, "auth", "user_account", "exact", ctx)
 
 	a, ok := ctx.byPosition[1]
 	if !ok {
@@ -34,7 +34,7 @@ func TestAttributeCondUnqualifiedOnScanIsExact(t *testing.T) {
 	aliases := map[string]tableRef{
 		"session": {Schema: "auth", Table: "session"},
 	}
-	attributeCond("(id = $1)", aliases, "auth", "session", ctx)
+	attributeCond("(id = $1)", aliases, "auth", "session", "exact", ctx)
 
 	a, ok := ctx.byPosition[1]
 	if !ok {
@@ -54,7 +54,7 @@ func TestAttributeCondUnqualifiedOnScanIsExact(t *testing.T) {
 func TestAttributeCondMismatchedQualifierIsHeuristic(t *testing.T) {
 	ctx := &attrCtx{byPosition: map[int]*qshape.ParamAttribution{}}
 	aliases := map[string]tableRef{}
-	attributeCond("(outer_alias.id = $1)", aliases, "auth", "session", ctx)
+	attributeCond("(outer_alias.id = $1)", aliases, "auth", "session", "exact", ctx)
 
 	a, ok := ctx.byPosition[1]
 	if !ok {
@@ -62,23 +62,6 @@ func TestAttributeCondMismatchedQualifierIsHeuristic(t *testing.T) {
 	}
 	if a.Confidence != "heuristic" {
 		t.Errorf("expected heuristic for mismatched qualifier, got %s", a.Confidence)
-	}
-}
-
-func TestAttributeCondMultipleParams(t *testing.T) {
-	ctx := &attrCtx{byPosition: map[int]*qshape.ParamAttribution{}}
-	aliases := map[string]tableRef{
-		"t": {Schema: "auth", Table: "oauth_token"},
-	}
-	attributeCond("((t.access_sha = $2) AND (t.access_hash = hashtext($1)))", aliases, "auth", "oauth_token", ctx)
-
-	if a, ok := ctx.byPosition[2]; !ok || a.Column != "access_sha" {
-		t.Errorf("param 2 wrong: %+v ok=%v", a, ok)
-	}
-	// $1 is wrapped in hashtext(...) — no direct column comparison, so we
-	// don't attribute it. That's fine: unattributed, not incorrect.
-	if _, ok := ctx.byPosition[1]; ok {
-		t.Logf("note: $1 got attributed even though wrapped in function — acceptable but brittle")
 	}
 }
 
@@ -94,7 +77,7 @@ func TestWalkPlanFunctionScanWithAliasOnly(t *testing.T) {
 		"Filter": "(name = $1)"
 	}`)
 	c := &attrCtx{byPosition: map[int]*qshape.ParamAttribution{}}
-	walkPlan(plan, "", "", c)
+	walkPlan(plan, c)
 
 	a, ok := c.byPosition[1]
 	if !ok {
@@ -108,15 +91,36 @@ func TestWalkPlanFunctionScanWithAliasOnly(t *testing.T) {
 	}
 }
 
+// A CTE or Subquery Scan alias is not a table statistics exist for, so an
+// unqualified column there is a guess, not an exact attribution.
+func TestWalkPlanCTEScanIsHeuristic(t *testing.T) {
+	plan := json.RawMessage(`{
+		"Node Type": "CTE Scan",
+		"CTE Name": "recent",
+		"Alias": "recent",
+		"Filter": "(account_id = $1)"
+	}`)
+	c := &attrCtx{byPosition: map[int]*qshape.ParamAttribution{}}
+	walkPlan(plan, c)
+
+	a, ok := c.byPosition[1]
+	if !ok {
+		t.Fatal("expected param 1 attributed")
+	}
+	if a.Confidence != "heuristic" {
+		t.Errorf("expected heuristic for CTE Scan alias, got %s", a.Confidence)
+	}
+}
+
 func TestAttributeCondPreservesExactOverHeuristic(t *testing.T) {
 	ctx := &attrCtx{byPosition: map[int]*qshape.ParamAttribution{}}
 	aliases := map[string]tableRef{
 		"u": {Schema: "auth", Table: "user_account"},
 	}
 	// First hit: exact
-	attributeCond("(u.user_id = $1)", aliases, "", "", ctx)
+	attributeCond("(u.user_id = $1)", aliases, "", "", "exact", ctx)
 	// Second hit that would be heuristic on a different relation
-	attributeCond("(user_id = $1)", map[string]tableRef{}, "public", "other_table", ctx)
+	attributeCond("(user_id = $1)", map[string]tableRef{}, "public", "other_table", "exact", ctx)
 
 	a := ctx.byPosition[1]
 	if a.Table != "user_account" || a.Confidence != "exact" {
@@ -142,6 +146,80 @@ func TestAttributeFromPlanFillsMissing(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("entry %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// On PG < 17 ruleutils prints InitPlan outputs as `$N` in the same namespace
+// as the query's own parameters. When `$1` is an InitPlan output, the
+// external `$1` must not be attributed to the node that references the
+// InitPlan.
+func TestAttributeFromPlanInitPlanAmbiguityPG16(t *testing.T) {
+	planJSON := []byte(`[{"Plan": {
+		"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "events",
+		"Filter": "((account_id = $0) AND (tenant_id = $1))",
+		"Plans": [
+			{"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "accounts",
+			 "Parent Relationship": "InitPlan", "Subplan Name": "InitPlan 1 (returns $0)",
+			 "Filter": "((status)::text = $1)"},
+			{"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "accounts",
+			 "Parent Relationship": "InitPlan", "Subplan Name": "InitPlan 2 (returns $1)",
+			 "Filter": "((status)::text = $2)"}
+		]}}]`)
+	canonical := "SELECT * FROM events WHERE account_id = (SELECT account_id FROM accounts WHERE status = $1) AND tenant_id = (SELECT account_id FROM accounts WHERE status = $2)"
+
+	got := attributeFromPlan(planJSON, paramPositions(canonical))
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2: %+v", len(got), got)
+	}
+	if got[0].Confidence != "none" {
+		t.Errorf("$1 collides with an InitPlan output and must be none, got %+v", got[0])
+	}
+	if got[1].Confidence != "exact" || got[1].Column != "status" {
+		t.Errorf("$2 should attribute to accounts.status, got %+v", got[1])
+	}
+}
+
+// Confidence ranks exact > expression > heuristic: a later hit only replaces
+// an earlier one it outranks.
+func TestAttributeCondRankMerge(t *testing.T) {
+	ctx := &attrCtx{byPosition: map[int]*qshape.ParamAttribution{}}
+	aliases := map[string]tableRef{"e": {Schema: "public", Table: "events"}}
+	steps := []struct{ cond, want string }{
+		{"(outer.x = $1)", "heuristic"},
+		{"(e.created_at > now() - $1)", "expression"},
+		{"(outer.y = $1)", "expression"},
+		{"(e.updated_at = $1)", "exact"},
+		{"(e.created_at > now() - $1)", "exact"},
+	}
+	for _, st := range steps {
+		attributeCond(st.cond, aliases, "public", "other", "exact", ctx)
+		if got := ctx.byPosition[1].Confidence; got != st.want {
+			t.Fatalf("after %s: confidence = %s, want %s", st.cond, got, st.want)
+		}
+	}
+}
+
+// On PG 17+ InitPlan outputs are referenced as `(InitPlan N).colN`, so the
+// external `$1`/`$2` are unambiguous and both attribute.
+func TestAttributeFromPlanInitPlanPG18(t *testing.T) {
+	planJSON := []byte(`[{"Plan": {
+		"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "events",
+		"Filter": "((account_id = (InitPlan 1).col1) AND (tenant_id = (InitPlan 2).col1))",
+		"Plans": [
+			{"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "accounts",
+			 "Parent Relationship": "InitPlan", "Subplan Name": "InitPlan 1",
+			 "Filter": "((status)::text = $1)"},
+			{"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "accounts",
+			 "Parent Relationship": "InitPlan", "Subplan Name": "InitPlan 2",
+			 "Filter": "((status)::text = $2)"}
+		]}}]`)
+	canonical := "SELECT * FROM events WHERE account_id = (SELECT account_id FROM accounts WHERE status = $1) AND tenant_id = (SELECT account_id FROM accounts WHERE status = $2)"
+
+	got := attributeFromPlan(planJSON, paramPositions(canonical))
+	for i, a := range got {
+		if a.Confidence != "exact" || a.Column != "status" {
+			t.Errorf("entry %d = %+v, want exact accounts.status", i, a)
 		}
 	}
 }

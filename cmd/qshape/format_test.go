@@ -38,6 +38,12 @@ func TestValidateSchemaVersionUnknown(t *testing.T) {
 	}
 }
 
+func TestValidateSchemaVersionV1Accepted(t *testing.T) {
+	if err := validateSchemaVersion(&clustersDoc{SchemaVersion: "1"}); err != nil {
+		t.Errorf("v1 should be accepted as input: %v", err)
+	}
+}
+
 func TestClustersDocRoundTrip(t *testing.T) {
 	in := clustersDoc{
 		SchemaVersion: currentSchemaVersion,
@@ -49,7 +55,7 @@ func TestClustersDocRoundTrip(t *testing.T) {
 	if err := json.NewEncoder(&buf).Encode(in); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(buf.String(), `"schema_version":"1"`) {
+	if !strings.Contains(buf.String(), `"schema_version":"2"`) {
 		t.Errorf("encoded output missing schema_version:\n%s", buf.String())
 	}
 	var out clustersDoc
