@@ -123,3 +123,25 @@ func TestAttributeCondPreservesExactOverHeuristic(t *testing.T) {
 		t.Errorf("exact attribution overwritten by heuristic: %+v", a)
 	}
 }
+
+// A plan can only attribute parameters that appear in a condition. One that
+// sits in a target list is still emitted, as confidence:"none", so the
+// cluster is never dropped (FR ask 4).
+func TestAttributeFromPlanFillsMissing(t *testing.T) {
+	planJSON := []byte(`[{"Plan": {"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "events", "Filter": "(account_id = $1)"}}]`)
+	canonical := "SELECT $2 FROM events WHERE account_id = $1"
+
+	got := attributeFromPlan(planJSON, paramPositions(canonical))
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2: %+v", len(got), got)
+	}
+	want := []qshape.ParamAttribution{
+		{Position: 1, Schema: "public", Table: "events", Column: "account_id", Confidence: "exact"},
+		{Position: 2, Confidence: "none"},
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entry %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}

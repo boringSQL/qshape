@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"regexp"
-	"sort"
 	"strconv"
 
 	"github.com/boringsql/qshape"
@@ -53,6 +52,7 @@ func attributeCmd() *cobra.Command {
 		inPath  string
 		connStr string
 		top     int
+		verbose bool
 	)
 	cmd := &cobra.Command{
 		Use:   "attribute",
@@ -60,22 +60,23 @@ func attributeCmd() *cobra.Command {
 		Long: `Read a clusters.json, run EXPLAIN (GENERIC_PLAN) on each cluster's
 canonical SQL, and attribute every $N placeholder to a table.column.
 
-Attribution failures are recorded as confidence:"none" rather than
-aborting. Writes the input to stdout with a "params" array added to
-each cluster.`,
+Every parameter gets an entry; unattributed ones are confidence:"none" rather
+than aborting, and a cluster is never dropped. Writes the input to stdout
+with a "params" array added to each cluster.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return runAttribute(inPath, connStr, top)
+			return runAttribute(inPath, connStr, top, verbose)
 		},
 	}
 	cmd.Flags().StringVar(&inPath, "in", "", "input clusters.json (default: stdin)")
 	cmd.Flags().StringVar(&connStr, "conn", "", "PostgreSQL connection string (required)")
 	cmd.Flags().IntVar(&top, "top", 0, "only attribute the top N clusters (0 = all)")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "print every partially attributed cluster in the summary")
 	_ = cmd.MarkFlagRequired("conn")
 	return cmd
 }
 
-func runAttribute(inPath, connStr string, top int) error {
+func runAttribute(inPath, connStr string, top int, verbose bool) error {
 	var r io.Reader = os.Stdin
 	if inPath != "" {
 		f, err := os.Open(inPath)
@@ -101,7 +102,7 @@ func runAttribute(inPath, connStr string, top int) error {
 	defer conn.Close(ctx)
 
 	cache := newTypecastCache(conn)
-	attributed, skipped := 0, 0
+	var stats attrStats
 	for i := range doc.Clusters {
 		if top > 0 && i >= top {
 			break
@@ -110,40 +111,51 @@ func runAttribute(inPath, connStr string, top int) error {
 		if c.Fingerprint == "" || c.Canonical == "" {
 			continue
 		}
-		params, err := attributeCluster(ctx, conn, cache, c.Canonical)
-		if err != nil {
-			skipped++
-			c.Params = []qshape.ParamAttribution{{Confidence: "none", Note: err.Error()}}
-			continue
+		canonical, params, explainErr := attributeCluster(ctx, conn, cache, c.Canonical)
+		// Positions refer to the re-normalised canonical, so persist it even
+		// when EXPLAIN failed.
+		c.Canonical = canonical
+		if explainErr != nil {
+			stats.explainErrors++
 		}
 		if len(params) == 0 {
-			skipped++
+			stats.withoutParams++
+			// Drop params from an earlier run: they refer to the old canonical.
+			c.Params = nil
 			continue
 		}
 		c.Params = params
-		attributed++
+		stats.add(c.Fingerprint, params)
 	}
 
-	fmt.Fprintf(os.Stderr, "attributed %d clusters, %d skipped\n", attributed, skipped)
+	printAttrSummary(os.Stderr, stats, verbose)
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
 }
 
-func attributeCluster(ctx context.Context, conn *pgx.Conn, cache *typecastCache, canonical string) ([]qshape.ParamAttribution, error) {
+// attributeCluster re-normalises canonical, EXPLAINs it, and returns the
+// canonical it used plus one entry per parameter.
+func attributeCluster(ctx context.Context, conn *pgx.Conn, cache *typecastCache, canonical string) (string, []qshape.ParamAttribution, error) {
 	// Re-normalise so clusters.json written by an older qshape version picks
 	// up current reshape fixes (extract-field recovery, param renumbering).
 	// Fall back to the stored form if parsing fails
 	if renormed, err := qshape.Normalize(canonical); err == nil {
 		canonical = renormed
 	}
+	positions := paramPositions(canonical)
+	if len(positions) == 0 {
+		return canonical, nil, nil
+	}
 	explainSQL := castFuncParamRefs(ctx, cache, canonical)
 	// PREPARE + EXPLAIN EXECUTE so Postgres sets up a parameter context
 	// for the $N placeholders. Works on any PG version (GENERIC_PLAN alone
 	// requires 16+, and the simple-query parser rejects bare $N otherwise).
 	// Types come from the typecast pass we just ran; NULL values satisfy
-	// EXECUTE's arity requirement without affecting the plan
-	nparams := maxParamNumber(explainSQL)
+	// EXECUTE's arity requirement. nparams is the highest position, which
+	// equals the count only when positions are contiguous (always true after
+	// renumbering; on the fallback path a gap makes PREPARE fail).
+	nparams := positions[len(positions)-1]
 	nulls := "NULL"
 	for i := 1; i < nparams; i++ {
 		nulls += ", NULL"
@@ -153,11 +165,7 @@ func attributeCluster(ctx context.Context, conn *pgx.Conn, cache *typecastCache,
 	// `WHERE col = NULL` filters that walkPlan can't attribute
 	script := "SET LOCAL plan_cache_mode = force_generic_plan;\n"
 	script += "PREPARE _qshape_tmp AS " + explainSQL + ";\n"
-	if nparams > 0 {
-		script += "EXPLAIN (FORMAT JSON) EXECUTE _qshape_tmp(" + nulls + ");\n"
-	} else {
-		script += "EXPLAIN (FORMAT JSON) EXECUTE _qshape_tmp;\n"
-	}
+	script += "EXPLAIN (FORMAT JSON) EXECUTE _qshape_tmp(" + nulls + ");\n"
 	script += "DEALLOCATE _qshape_tmp;"
 	// SET LOCAL only applies inside a transaction — wrap the whole script
 	script = "BEGIN;\n" + script + "\nCOMMIT;"
@@ -169,28 +177,26 @@ func attributeCluster(ctx context.Context, conn *pgx.Conn, cache *typecastCache,
 		// 25P02. ROLLBACK resets it before the next call.
 		_, _ = conn.Exec(ctx, "ROLLBACK")
 		_, _ = conn.Exec(ctx, "DEALLOCATE IF EXISTS _qshape_tmp")
-		return nil, err
+		return canonical, noneEntries(positions, err.Error()), err
 	}
+	return canonical, attributeFromPlan(planJSON, positions), nil
+}
 
+// attributeFromPlan turns an EXPLAIN (FORMAT JSON) result into one entry per
+// canonical position.
+func attributeFromPlan(planJSON []byte, positions []int) []qshape.ParamAttribution {
 	var plans []struct {
 		Plan json.RawMessage `json:"Plan"`
 	}
 	if err := json.Unmarshal(planJSON, &plans); err != nil {
-		return nil, err
+		return noneEntries(positions, err.Error())
 	}
 	if len(plans) == 0 {
-		return nil, nil
+		return noneEntries(positions, "")
 	}
-
 	c := &attrCtx{byPosition: map[int]*qshape.ParamAttribution{}}
 	walkPlan(plans[0].Plan, "", "", c)
-
-	out := make([]qshape.ParamAttribution, 0, len(c.byPosition))
-	for _, p := range c.byPosition {
-		out = append(out, *p)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Position < out[j].Position })
-	return out, nil
+	return fillPositions(c.byPosition, positions)
 }
 
 // readPlanJSON runs a multi-statement script (PREPARE; EXPLAIN; DEALLOCATE)
