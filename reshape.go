@@ -55,34 +55,30 @@ func renumberParams(root *pg_query.Node) {
 	applyParamRemap(root, remap)
 }
 
+// WalkNodes, not forEachChild: a missed node type lets two params
+// collapse onto the same $N.
 func collectParams(n *pg_query.Node, out map[int32]bool) {
-	if n == nil {
-		return
-	}
-	if p, ok := n.Node.(*pg_query.Node_ParamRef); ok {
-		out[p.ParamRef.Number] = true
-	}
-	forEachChild(n, func(c *pg_query.Node) { collectParams(c, out) })
+	WalkNodes(n, func(node *pg_query.Node) {
+		if p, ok := node.Node.(*pg_query.Node_ParamRef); ok {
+			out[p.ParamRef.Number] = true
+		}
+	})
 }
 
 func applyParamRemap(n *pg_query.Node, remap map[int32]int32) {
-	if n == nil {
-		return
-	}
-	if p, ok := n.Node.(*pg_query.Node_ParamRef); ok {
-		if nn, has := remap[p.ParamRef.Number]; has {
-			p.ParamRef.Number = nn
+	WalkNodes(n, func(node *pg_query.Node) {
+		if p, ok := node.Node.(*pg_query.Node_ParamRef); ok {
+			if nn, has := remap[p.ParamRef.Number]; has {
+				p.ParamRef.Number = nn
+			}
 		}
-	}
-	forEachChild(n, func(c *pg_query.Node) { applyParamRemap(c, remap) })
+	})
 }
 
-// forEachChild invokes f on every immediate child Node of n that can
-// contain a ParamRef. This is intentionally broader than the reshape
-// walkers (no scope logic needed here) but still a fixed set of cases —
-// new pg_query Node types just mean params inside them won't be renumbered.
-// stripSortClause also rides this walker; a missing case additionally leaves
-// that subtree's ORDER BY in place and fragments its CostKey.
+// forEachChild invokes f on every immediate child Node of n. A fixed set
+// of cases, not a full walk — WalkNodes covers every node type.
+// stripSortClause rides it; a miss leaves that subtree's ORDER BY in
+// place and fragments its CostKey.
 func forEachChild(n *pg_query.Node, f func(*pg_query.Node)) {
 	if n == nil {
 		return
@@ -182,6 +178,14 @@ func forEachChild(n *pg_query.Node, f func(*pg_query.Node)) {
 	case *pg_query.Node_AExpr:
 		f(v.AExpr.Lexpr)
 		f(v.AExpr.Rexpr)
+	case *pg_query.Node_AArrayExpr:
+		for _, e := range v.AArrayExpr.Elements {
+			f(e)
+		}
+	case *pg_query.Node_RowExpr:
+		for _, a := range v.RowExpr.Args {
+			f(a)
+		}
 	case *pg_query.Node_BoolExpr:
 		for _, a := range v.BoolExpr.Args {
 			f(a)

@@ -3,6 +3,8 @@ package qshape
 import (
 	"strings"
 	"testing"
+
+	pg_query "github.com/pganalyze/pg_query_go/v6"
 )
 
 func TestReshapeStripsSingleTableAlias(t *testing.T) {
@@ -297,6 +299,87 @@ func TestReshapeAggFilterAndCaseExprRefsGetRewritten(t *testing.T) {
 	if strings.Contains(got, "wu.") {
 		t.Errorf("wu. refs not rewritten (FILTER and/or CASE arg): %q", got)
 	}
+}
+
+// Params inside ARRAY[] and ROW() must be renumbered too, or gaps left by
+// unrelated fixups can collide two parameters onto one $N.
+func TestReshapeRenumbersParamsInArrayLiteral(t *testing.T) {
+	got, err := Normalize("SELECT id FROM t WHERE a = $4 AND b = ANY(ARRAY[$1, $2])")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "SELECT id FROM t WHERE a = $3 AND b = ANY(ARRAY[$1, $2])"
+	if got != want {
+		t.Errorf("got:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReshapeRenumbersParamsInRowExpr(t *testing.T) {
+	got, err := Normalize("SELECT id FROM t WHERE (a, b) = ($3, $5)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "SELECT id FROM t WHERE ($1, $2) = (a, b)"
+	if got != want {
+		t.Errorf("got:  %q\nwant: %q", got, want)
+	}
+}
+
+// renumberParams must see every ParamRef regardless of node type. The old
+// hand-written walker skipped these subtrees, so the fixup renumbering
+// collapsed two different parameters onto one $N.
+func TestReshapeRenumberCoversAllNodeTypes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"range function", "SELECT 1 FROM generate_series(1, $1) g WHERE g > $3"},
+		{"aggregate filter", "SELECT count(*) FILTER (WHERE a = $1) FROM t WHERE b = $3"},
+		{"array indirection", "SELECT (arr)[$1] FROM t WHERE b = $3"},
+		{"named arg", "SELECT f(x => $1) FROM t WHERE b = $3"},
+		{"collate clause", `SELECT 1 FROM t WHERE name = $1 COLLATE "C" AND b = $3`},
+		{"on conflict clause", "INSERT INTO t (a, b) VALUES ($2, $3) ON CONFLICT (a) DO UPDATE SET b = $1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Normalize(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			counts := paramCounts(t, got)
+			for n := 1; n <= len(counts); n++ {
+				if counts[int32(n)] != 1 {
+					t.Fatalf("param $%d appears %d time(s), want exactly 1, in %q", n, counts[int32(n)], got)
+				}
+			}
+			for n := range counts {
+				if n < 1 || int(n) > len(counts) {
+					t.Fatalf("param $%d is a gap or collision in %q", n, got)
+				}
+			}
+		})
+	}
+}
+
+// paramCounts counts occurrences of each $N after a full protoreflect walk.
+func paramCounts(t *testing.T, sql string) map[int32]int {
+	t.Helper()
+	tree, err := pg_query.Parse(sql)
+	if err != nil {
+		t.Fatalf("parse %q: %v", sql, err)
+	}
+	counts := map[int32]int{}
+	for _, raw := range tree.Stmts {
+		if raw == nil {
+			continue
+		}
+		WalkNodes(raw.Stmt, func(n *pg_query.Node) {
+			if p, ok := n.Node.(*pg_query.Node_ParamRef); ok {
+				counts[p.ParamRef.Number]++
+			}
+		})
+	}
+	return counts
 }
 
 func TestReshapeUnionBothArms(t *testing.T) {
