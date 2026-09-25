@@ -1,0 +1,49 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Seq Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Relation Name": "accounts",
+      "Alias": "a",
+      "Startup Cost": 0.00,
+      "Total Cost": 14434.75,
+      "Plan Rows": 2,
+      "Plan Width": 4,
+      "Disabled": false,
+      "Filter": "(((status)::text = $1) AND ((SubPlan 1) > 0))",
+      "Plans": [
+        {
+          "Node Type": "Aggregate",
+          "Strategy": "Plain",
+          "Partial Mode": "Simple",
+          "Parent Relationship": "SubPlan",
+          "Subplan Name": "SubPlan 1",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 16.00,
+          "Total Cost": 16.01,
+          "Plan Rows": 1,
+          "Plan Width": 8,
+          "Disabled": false,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "events",
+              "Alias": "e",
+              "Startup Cost": 0.00,
+              "Total Cost": 16.00,
+              "Plan Rows": 1,
+              "Plan Width": 0,
+              "Disabled": false,
+              "Filter": "((account_id = a.id) AND (kind = $2))"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

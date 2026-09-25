@@ -151,37 +151,6 @@ func TestAttributeFromPlanFillsMissing(t *testing.T) {
 	}
 }
 
-// On PG < 17 ruleutils prints InitPlan outputs as `$N` in the same namespace
-// as the query's own parameters. When `$1` is an InitPlan output, the
-// external `$1` must not be attributed to the node that references the
-// InitPlan.
-func TestAttributeFromPlanInitPlanAmbiguityPG16(t *testing.T) {
-	planJSON := []byte(`[{"Plan": {
-		"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "events",
-		"Filter": "((account_id = $0) AND (tenant_id = $1))",
-		"Plans": [
-			{"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "accounts",
-			 "Parent Relationship": "InitPlan", "Subplan Name": "InitPlan 1 (returns $0)",
-			 "Filter": "((status)::text = $1)"},
-			{"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "accounts",
-			 "Parent Relationship": "InitPlan", "Subplan Name": "InitPlan 2 (returns $1)",
-			 "Filter": "((status)::text = $2)"}
-		]}}]`)
-	canonical := "SELECT * FROM events WHERE account_id = (SELECT account_id FROM accounts WHERE status = $1) AND tenant_id = (SELECT account_id FROM accounts WHERE status = $2)"
-
-	positions, _ := paramsFromTree(canonical)
-	got := attributeFromPlan(planJSON, positions)
-	if len(got) != 2 {
-		t.Fatalf("got %d entries, want 2: %+v", len(got), got)
-	}
-	if got[0].Confidence != "none" {
-		t.Errorf("$1 collides with an InitPlan output and must be none, got %+v", got[0])
-	}
-	if got[1].Confidence != "exact" || got[1].Column != "status" {
-		t.Errorf("$2 should attribute to accounts.status, got %+v", got[1])
-	}
-}
-
 // Confidence ranks exact > expression > heuristic: a later hit only replaces
 // an earlier one it outranks.
 func TestAttributeCondRankMerge(t *testing.T) {
@@ -198,31 +167,6 @@ func TestAttributeCondRankMerge(t *testing.T) {
 		attributeCond(st.cond, aliases, "public", "other", "exact", ctx)
 		if got := ctx.byPosition[1].Confidence; got != st.want {
 			t.Fatalf("after %s: confidence = %s, want %s", st.cond, got, st.want)
-		}
-	}
-}
-
-// On PG 17+ InitPlan outputs are referenced as `(InitPlan N).colN`, so the
-// external `$1`/`$2` are unambiguous and both attribute.
-func TestAttributeFromPlanInitPlanPG18(t *testing.T) {
-	planJSON := []byte(`[{"Plan": {
-		"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "events",
-		"Filter": "((account_id = (InitPlan 1).col1) AND (tenant_id = (InitPlan 2).col1))",
-		"Plans": [
-			{"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "accounts",
-			 "Parent Relationship": "InitPlan", "Subplan Name": "InitPlan 1",
-			 "Filter": "((status)::text = $1)"},
-			{"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "accounts",
-			 "Parent Relationship": "InitPlan", "Subplan Name": "InitPlan 2",
-			 "Filter": "((status)::text = $2)"}
-		]}}]`)
-	canonical := "SELECT * FROM events WHERE account_id = (SELECT account_id FROM accounts WHERE status = $1) AND tenant_id = (SELECT account_id FROM accounts WHERE status = $2)"
-
-	positions, _ := paramsFromTree(canonical)
-	got := attributeFromPlan(planJSON, positions)
-	for i, a := range got {
-		if a.Confidence != "exact" || a.Column != "status" {
-			t.Errorf("entry %d = %+v, want exact accounts.status", i, a)
 		}
 	}
 }

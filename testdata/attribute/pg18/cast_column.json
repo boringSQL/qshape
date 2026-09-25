@@ -1,0 +1,17 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Seq Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Relation Name": "events",
+      "Alias": "events",
+      "Startup Cost": 0.00,
+      "Total Cost": 15.00,
+      "Plan Rows": 2,
+      "Plan Width": 8,
+      "Disabled": false,
+      "Filter": "((status)::text = $1)"
+    }
+  }
+]

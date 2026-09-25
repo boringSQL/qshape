@@ -1,0 +1,10 @@
+interval	SELECT id FROM events WHERE created_at > now() - $1::interval
+any_array	SELECT id FROM events WHERE account_id = ANY($1::int[])
+limit_offset	SELECT id FROM events WHERE kind = $1 ORDER BY created_at LIMIT $2 OFFSET $3
+in_list_bare	SELECT id FROM events WHERE kind IN ($1, $2)
+in_list_cast	SELECT id FROM events WHERE status IN ($1, $2)
+cast_column	SELECT id FROM events WHERE status = $1
+like	SELECT id FROM events WHERE email LIKE $1
+jsonb_contains	SELECT id FROM events WHERE data @> $1
+initplan	SELECT id FROM events WHERE account_id = (SELECT id FROM accounts WHERE status = $1) AND kind = (SELECT kind FROM events WHERE email = $2 LIMIT 1)
+subplan	SELECT a.id FROM accounts a WHERE a.status = $1 AND (SELECT count(*) FROM events e WHERE e.account_id = a.id AND e.kind = $2) > 0
