@@ -34,9 +34,9 @@ type partialCluster struct {
 	unattributed []int
 }
 
-// add records one attributed cluster. "Fully attributed" means no entry is
-// none; "auto-fillable" means every entry is exact.
-func (s *attrStats) add(fingerprint string, params []qshape.ParamAttribution) {
+// add records one attributed cluster; "auto-fillable" also needs a successful
+// EXPLAIN.
+func (s *attrStats) add(fingerprint string, params []qshape.ParamAttribution, explainFailed bool) {
 	s.withParams++
 	s.totalParams += len(params)
 	fully, exactAll := true, true
@@ -71,7 +71,7 @@ func (s *attrStats) add(fingerprint string, params []qshape.ParamAttribution) {
 			unattributed: unattributed,
 		})
 	}
-	if exactAll {
+	if exactAll && !explainFailed {
 		s.autoFillable++
 	}
 }

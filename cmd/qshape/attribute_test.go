@@ -135,7 +135,8 @@ func TestAttributeFromPlanFillsMissing(t *testing.T) {
 	planJSON := []byte(`[{"Plan": {"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "events", "Filter": "(account_id = $1)"}}]`)
 	canonical := "SELECT $2 FROM events WHERE account_id = $1"
 
-	got := attributeFromPlan(planJSON, paramPositions(canonical))
+	positions, _ := paramsFromTree(canonical)
+	got := attributeFromPlan(planJSON, positions)
 	if len(got) != 2 {
 		t.Fatalf("got %d entries, want 2: %+v", len(got), got)
 	}
@@ -168,7 +169,8 @@ func TestAttributeFromPlanInitPlanAmbiguityPG16(t *testing.T) {
 		]}}]`)
 	canonical := "SELECT * FROM events WHERE account_id = (SELECT account_id FROM accounts WHERE status = $1) AND tenant_id = (SELECT account_id FROM accounts WHERE status = $2)"
 
-	got := attributeFromPlan(planJSON, paramPositions(canonical))
+	positions, _ := paramsFromTree(canonical)
+	got := attributeFromPlan(planJSON, positions)
 	if len(got) != 2 {
 		t.Fatalf("got %d entries, want 2: %+v", len(got), got)
 	}
@@ -216,7 +218,8 @@ func TestAttributeFromPlanInitPlanPG18(t *testing.T) {
 		]}}]`)
 	canonical := "SELECT * FROM events WHERE account_id = (SELECT account_id FROM accounts WHERE status = $1) AND tenant_id = (SELECT account_id FROM accounts WHERE status = $2)"
 
-	got := attributeFromPlan(planJSON, paramPositions(canonical))
+	positions, _ := paramsFromTree(canonical)
+	got := attributeFromPlan(planJSON, positions)
 	for i, a := range got {
 		if a.Confidence != "exact" || a.Column != "status" {
 			t.Errorf("entry %d = %+v, want exact accounts.status", i, a)

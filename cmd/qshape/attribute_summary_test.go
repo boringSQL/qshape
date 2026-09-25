@@ -62,7 +62,7 @@ func TestAttrStatsAutoFillableExcludesExpressionAndHeuristic(t *testing.T) {
 		{Position: 1, Confidence: "exact"},
 		{Position: 2, Confidence: "heuristic"},
 		{Position: 3, Confidence: "expression"},
-	})
+	}, false)
 	if s.autoFillable != 0 {
 		t.Errorf("autoFillable = %d, want 0", s.autoFillable)
 	}
@@ -71,5 +71,15 @@ func TestAttrStatsAutoFillableExcludesExpressionAndHeuristic(t *testing.T) {
 	}
 	if s.exact != 1 || s.expression != 1 || s.heuristic != 1 {
 		t.Errorf("counters = exact %d expression %d heuristic %d", s.exact, s.expression, s.heuristic)
+	}
+}
+
+// A LIMIT/OFFSET-only cluster is all exact even when EXPLAIN failed; it must
+// not count as auto-fillable.
+func TestAttrStatsAutoFillableExcludesExplainError(t *testing.T) {
+	var s attrStats
+	s.add("fp", []qshape.ParamAttribution{{Position: 1, Kind: "limit", Confidence: "exact"}}, true)
+	if s.autoFillable != 0 {
+		t.Errorf("autoFillable = %d, want 0", s.autoFillable)
 	}
 }

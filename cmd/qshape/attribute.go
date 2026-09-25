@@ -58,8 +58,9 @@ func attributeCmd() *cobra.Command {
 canonical SQL, and attribute every $N placeholder to a table.column.
 
 Every parameter gets an entry; unattributed ones are confidence:"none" rather
-than aborting, and a cluster is never dropped. Writes the input to stdout
-with a "params" array added to each cluster.`,
+than aborting, and a cluster is never dropped. LIMIT/OFFSET parameters get
+kind "limit"/"offset" and no column. Writes the input to stdout with a
+"params" array added to each cluster.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return runAttribute(inPath, connStr, top, verbose)
@@ -123,7 +124,7 @@ func runAttribute(inPath, connStr string, top int, verbose bool) error {
 			continue
 		}
 		c.Params = params
-		stats.add(c.Fingerprint, params)
+		stats.add(c.Fingerprint, params, explainErr != nil)
 	}
 
 	printAttrSummary(os.Stderr, stats, verbose)
@@ -141,7 +142,7 @@ func attributeCluster(ctx context.Context, conn *pgx.Conn, cache *typecastCache,
 	if renormed, err := qshape.Normalize(canonical); err == nil {
 		canonical = renormed
 	}
-	positions := paramPositions(canonical)
+	positions, limits := paramsFromTree(canonical)
 	if len(positions) == 0 {
 		return canonical, nil, nil
 	}
@@ -168,6 +169,7 @@ func attributeCluster(ctx context.Context, conn *pgx.Conn, cache *typecastCache,
 	// SET LOCAL only applies inside a transaction — wrap the whole script
 	script = "BEGIN;\n" + script + "\nCOMMIT;"
 	planJSON, err := readPlanJSON(ctx, conn, script)
+	var params []qshape.ParamAttribution
 	if err != nil {
 		// A mid-batch error aborts the BEGIN'd transaction and skips the
 		// trailing COMMIT in the same simple-query batch, so the connection
@@ -175,9 +177,12 @@ func attributeCluster(ctx context.Context, conn *pgx.Conn, cache *typecastCache,
 		// 25P02. ROLLBACK resets it before the next call.
 		_, _ = conn.Exec(ctx, "ROLLBACK")
 		_, _ = conn.Exec(ctx, "DEALLOCATE IF EXISTS _qshape_tmp")
-		return canonical, noneEntries(positions, err.Error()), err
+		params = noneEntries(positions, err.Error())
+	} else {
+		params = attributeFromPlan(planJSON, positions)
 	}
-	return canonical, attributeFromPlan(planJSON, positions), nil
+	markLimits(params, limits)
+	return canonical, params, err
 }
 
 // attributeFromPlan turns an EXPLAIN (FORMAT JSON) result into one entry per
